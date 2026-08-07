@@ -6,6 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/EmitC/IR/EmitC.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Rewrite/FrozenRewritePatternSet.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -45,13 +47,28 @@ public:
   }
 };
 
+class MatmulToSystolicRewriter: public OpRewritePattern<linalg::MatmulOp> {
+public:
+  using OpRewritePattern<linalg::MatmulOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::MatmulOp op, PatternRewriter &rewriter) const final{
+    // temporary: just marking that the match was found; haven't rewritten it yet
+    op.emitRemark("Match: finding linalg.matmul");
+    return failure();
+  }
+};
+
 class MatmulToSystolic
     : public impl::MatmulToSystolicBase<MatmulToSystolic> {
 public:
   using impl::MatmulToSystolicBase<MatmulToSystolic>::MatmulToSystolicBase;
 
   void runOnOperation() final {
-    getOperation()->emitRemark("icdec-matmul-to-systolic: pass jalan (belum ada logika)");
+    RewritePatternSet patterns(&getContext());
+    patterns.add<MatmulToSystolicRewriter>(&getContext());
+    FrozenRewritePatternSet patternSet(std::move(patterns));
+    if (failed(applyPatternsGreedily(getOperation(), patternSet)))
+      signalPassFailure();
   }
 };
 
