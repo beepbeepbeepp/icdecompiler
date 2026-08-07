@@ -14,6 +14,7 @@
 
 namespace mlir::standalone {
 #define GEN_PASS_DEF_STANDALONESWITCHBARFOO
+#define GEN_PASS_DEF_MATMULTOSYSTOLIC
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -43,5 +44,16 @@ public:
       signalPassFailure();
   }
 };
+
+class MatmulToSystolic
+    : public impl::MatmulToSystolicBase<MatmulToSystolic> {
+public:
+  using impl::MatmulToSystolicBase<MatmulToSystolic>::MatmulToSystolicBase;
+
+  void runOnOperation() final {
+    getOperation()->emitRemark("icdec-matmul-to-systolic: pass jalan (belum ada logika)");
+  }
+};
+
 } // namespace
 } // namespace mlir::standalone
