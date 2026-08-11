@@ -53,8 +53,20 @@ public:
 
   LogicalResult matchAndRewrite(linalg::MatmulOp op, PatternRewriter &rewriter) const final{
     // temporary: just marking that the match was found; haven't rewritten it yet
-    op.emitRemark("Match: finding linalg.matmul");
-    return failure();
+    
+    // collect operands: A, B (ins) and C (outs)
+
+    // step 1: prove the rewrite mechanism works, no operands yet
+    // memref is not a valid emitC operand type; conversion comes next
+    rewriter.create<emitc::CallOpaqueOp>(
+      op.getLoc(),
+      TypeRange{},
+      rewriter.getStringAttr("systolic_multiply_large"),
+      ValueRange{});
+    
+    // erase the origina linalg.matmul
+    rewriter.eraseOp(op);
+    return success();
   }
 };
 

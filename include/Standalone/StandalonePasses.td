@@ -29,6 +29,7 @@ def StandaloneSwitchBarFoo: Pass<"standalone-switch-bar-foo", "::mlir::ModuleOp"
 
 def MatmulToSystolic : Pass<"icdec-matmul-to-systolic", "::mlir::ModuleOp"> {
   let summary = "Rewrite tiled 8x8 matmul into systolic array driver call";
+  let dependentDialects = ["mlir::emitc::EmitCDialect"];
 }
 
 #endif // STANDALONE_PASS
