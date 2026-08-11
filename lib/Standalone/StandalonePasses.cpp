@@ -52,17 +52,35 @@ public:
   using OpRewritePattern<linalg::MatmulOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(linalg::MatmulOp op, PatternRewriter &rewriter) const final{
-    // temporary: just marking that the match was found; haven't rewritten it yet
-    
-    // collect operands: A, B (ins) and C (outs)
 
+    // read M, K, N from the static shape of A and B
+    auto aType = dyn_cast<MemRefType>(op.getInputs()[0].getType());
+    auto bType = dyn_cast<MemRefType>(op.getInputs()[1].getType());
+    if (!aType || !bType)
+      return failure();
+    if (!aType.hasStaticShape() || !bType.hasStaticShape())
+      return failure();
+
+    int64_t M = aType.getShape()[0];
+    int64_t K = aType.getShape()[1];
+    int64_t N = aType.getShape()[1];
+
+    // materialize M, K, N as i32 constants
+    auto i32Type = rewriter.getI32Type();
+    SmallVector<Value> args;
+    for (int64_t dim : {M, K, N}) {
+      auto attr = rewriter.getI32IntegerAttr(static_cast<int32_t>(dim));
+      args.push_back(rewriter.create<emitc::ConstantOp>(op.getLoc(), i32Type, attr));
+    }
+    // temporary: just marking that the match was found; haven't rewritten it yet
+    // collect operands: A, B (ins) and C (outs)
     // step 1: prove the rewrite mechanism works, no operands yet
     // memref is not a valid emitC operand type; conversion comes next
     rewriter.create<emitc::CallOpaqueOp>(
       op.getLoc(),
       TypeRange{},
       rewriter.getStringAttr("systolic_multiply_large"),
-      ValueRange{});
+      args);
     
     // erase the origina linalg.matmul
     rewriter.eraseOp(op);
