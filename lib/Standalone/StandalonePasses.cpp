@@ -47,62 +47,64 @@ public:
   }
 };
 
+// Shared rewrite: replace a matmul-like op with a systolic driver call.
+// Returns failure if shapes are not static 8x8.
+static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, ValueRange outputs, PatternRewriter &rewriter) {
+  
+  auto aType = dyn_cast<MemRefType>(inputs[0].getType());
+  auto bType = dyn_cast<MemRefType>(inputs[1].getType());
+  if (!aType || !bType)
+    return failure();
+  if (!aType.hasStaticShape() || !bType.hasStaticShape())
+    return failure();
+
+  int64_t M = aType.getShape()[0];
+  int64_t K = aType.getShape()[1];
+  int64_t N = bType.getShape()[1];
+
+  // only 8x8 tiles map to the systolic array; anything else falls back to CPU
+  constexpr int64_t kArraySize = 8;
+  if (M != kArraySize || K != kArraySize || N != kArraySize)
+    return failure();
+
+  // materialize M, K, N as i32 constants
+  auto i32Type = rewriter.getI32Type();
+  SmallVector<Value> args;
+  for (int64_t dim : {M, K, N}) {
+    auto attr = rewriter.getI32IntegerAttr(static_cast<int32_t>(dim));
+    args.push_back(rewriter.create<emitc::ConstantOp>(
+        op->getLoc(), i32Type, attr));
+  }
+
+  // append buffer operands, looking through unrealized_conversion_cast
+  auto unwrap = [](Value v) -> Value {
+    if (auto cast = v.getDefiningOp<UnrealizedConversionCastOp>())
+      if (cast.getInputs().size() == 1)
+        return cast.getInputs()[0];
+    return v;
+  };
+  for (Value v : inputs)
+    args.push_back(unwrap(v));
+  for (Value v : outputs)
+    args.push_back(unwrap(v));
+
+  rewriter.create<emitc::CallOpaqueOp>(
+      op->getLoc(),
+      TypeRange{},
+      rewriter.getStringAttr("systolic_multiply_large"),
+      args);
+
+  rewriter.eraseOp(op);
+  return success();
+}
+
 class MatmulToSystolicRewriter: public OpRewritePattern<linalg::MatmulOp> {
 public:
   using OpRewritePattern<linalg::MatmulOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(linalg::MatmulOp op, PatternRewriter &rewriter) const final{
 
-    // read M, K, N from the static shape of A and B
-    auto aType = dyn_cast<MemRefType>(op.getInputs()[0].getType());
-    auto bType = dyn_cast<MemRefType>(op.getInputs()[1].getType());
-    if (!aType || !bType)
-      return failure();
-    if (!aType.hasStaticShape() || !bType.hasStaticShape())
-      return failure();
-
-    int64_t M = aType.getShape()[0];
-    int64_t K = aType.getShape()[1];
-    int64_t N = aType.getShape()[1];
-
-    // only 8x8 tiles map to the systolic array; anything else falls back to CPU
-    constexpr int64_t kArraySize = 8;
-    if (M != kArraySize || K != kArraySize || N !=kArraySize)
-      return failure();
-
-    // materialize M, K, N as i32 constants
-    auto i32Type = rewriter.getI32Type();
-    SmallVector<Value> args;
-    for (int64_t dim : {M, K, N}) {
-      auto attr = rewriter.getI32IntegerAttr(static_cast<int32_t>(dim));
-      args.push_back(rewriter.create<emitc::ConstantOp>(op.getLoc(), i32Type, attr));
-    }
-    // temporary: just marking that the match was found; haven't rewritten it yet
-    // collect operands: A, B (ins) and C (outs)
-    // step 1: prove the rewrite mechanism works, no operands yet
-    // memref is not a valid emitC operand type; conversion comes next
-    
-    // append buffer operands: A, B (ins) and Res (outs)
-    auto unwrap = [](Value v) -> Value {
-      if (auto cast = v.getDefiningOp<UnrealizedConversionCastOp>())
-        if (cast.getInputs().size() == 1)
-          return cast.getInputs()[0];
-      return v;
-    };
-    for (Value v : op.getInputs())
-      args.push_back(unwrap(v));
-    for (Value v : op.getOutputs())
-      args.push_back(unwrap(v));
-
-    rewriter.create<emitc::CallOpaqueOp>(
-      op.getLoc(),
-      TypeRange{},
-      rewriter.getStringAttr("systolic_multiply_large"),
-      args);
-    
-    // erase the origina linalg.matmul
-    rewriter.eraseOp(op);
-    return success();
+    return rewriteToSystolicCall(op, op.getInputs(), op.getOutputs(), rewriter);
   }
 };
 
