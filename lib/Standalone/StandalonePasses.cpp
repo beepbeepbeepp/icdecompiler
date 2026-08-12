@@ -76,6 +76,19 @@ public:
     // collect operands: A, B (ins) and C (outs)
     // step 1: prove the rewrite mechanism works, no operands yet
     // memref is not a valid emitC operand type; conversion comes next
+    
+    // append buffer operands: A, B (ins) and Res (outs)
+    auto unwrap = [](Value v) -> Value {
+      if (auto cast = v.getDefiningOp<UnrealizedConversionCastOp>())
+        if (cast.getInputs().size() == 1)
+          return cast.getInputs()[0];
+      return v;
+    };
+    for (Value v : op.getInputs())
+      args.push_back(unwrap(v));
+    for (Value v : op.getOutputs())
+      args.push_back(unwrap(v));
+
     rewriter.create<emitc::CallOpaqueOp>(
       op.getLoc(),
       TypeRange{},
