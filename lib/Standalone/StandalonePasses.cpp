@@ -103,10 +103,40 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
     return v;
   };
 
-  for (Value v : inputs)
-    args.push_back(unwrap(v));
-  for (Value v : outputs)
-    args.push_back(unwrap(v));
+// convert each buffer to a flat C pointer: &arr[0]...[0]
+  auto toPointer = [&](Value v) -> Value {
+    Value base = unwrap(v);
+    auto arrType = dyn_cast<emitc::ArrayType>(base.getType());
+    if (!arrType)
+      return Value();
+
+    // build one zero index per array dimension
+    auto indexType = rewriter.getIndexType();
+    auto zeroAttr = rewriter.getIndexAttr(0);
+    Value zero = rewriter.create<emitc::ConstantOp>(
+        op->getLoc(), indexType, zeroAttr);
+    SmallVector<Value> indices(arrType.getRank(), zero);
+
+  auto typedBase = cast<TypedValue<emitc::ArrayType>>(base);
+    Value elem = rewriter.create<emitc::SubscriptOp>(
+        op->getLoc(), typedBase, ValueRange(indices));
+
+    auto ptrType = emitc::PointerType::get(arrType.getElementType());
+    return rewriter.create<emitc::AddressOfOp>(op->getLoc(), ptrType, elem);
+  };
+
+  for (Value v : inputs) {
+    Value p = toPointer(v);
+    if (!p)
+      return failure();
+    args.push_back(p);
+  }
+  for (Value v : outputs) {
+    Value p = toPointer(v);
+    if (!p)
+      return failure();
+    args.push_back(p);
+  }
 
   rewriter.create<emitc::CallOpaqueOp>(
       op->getLoc(),
