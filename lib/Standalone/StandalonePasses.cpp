@@ -65,6 +65,11 @@ public:
     int64_t K = aType.getShape()[1];
     int64_t N = aType.getShape()[1];
 
+    // only 8x8 tiles map to the systolic array; anything else falls back to CPU
+    constexpr int64_t kArraySize = 8;
+    if (M != kArraySize || K != kArraySize || N !=kArraySize)
+      return failure();
+
     // materialize M, K, N as i32 constants
     auto i32Type = rewriter.getI32Type();
     SmallVector<Value> args;
