@@ -108,6 +108,44 @@ public:
   }
 };
 
+class GenericMatmulToSystolicRewriter
+    : public OpRewritePattern<linalg::GenericOp> {
+public:
+  using OpRewritePattern<linalg::GenericOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::GenericOp op,
+                                PatternRewriter &rewriter) const final {
+    // shape check: exactly two inputs and one output
+    if (op.getInputs().size() != 2 || op.getOutputs().size() != 1)
+      return failure();
+
+    // iterator check: must contain a reduction dimension
+    auto iterTypes = op.getIteratorTypesArray();
+    bool hasReduction = llvm::any_of(iterTypes, [](utils::IteratorType t) {
+      return t == utils::IteratorType::reduction;
+    });
+    if (!hasReduction)
+      return failure();
+
+    // body check: must be exactly mulf -> addf -> yield
+    Block &body = op.getRegion().front();
+    auto ops = body.without_terminator();
+    if (std::distance(ops.begin(), ops.end()) != 2)
+      return failure();
+
+    auto it = ops.begin();
+    auto *mulOp = &*it++;
+    auto *addOp = &*it;
+    if (!isa<arith::MulFOp>(mulOp) || !isa<arith::AddFOp>(addOp))
+      return failure();
+
+    // the add must consume the mul result
+    if (addOp->getOperand(0) != mulOp->getResult(0))
+      return failure();
+
+    return rewriteToSystolicCall(op, op.getInputs(), op.getOutputs(), rewriter);
+  }
+};
 class MatmulToSystolic
     : public impl::MatmulToSystolicBase<MatmulToSystolic> {
 public:
@@ -116,6 +154,7 @@ public:
   void runOnOperation() final {
     RewritePatternSet patterns(&getContext());
     patterns.add<MatmulToSystolicRewriter>(&getContext());
+    patterns.add<GenericMatmulToSystolicRewriter>(&getContext());
     FrozenRewritePatternSet patternSet(std::move(patterns));
     if (failed(applyPatternsGreedily(getOperation(), patternSet)))
       signalPassFailure();
