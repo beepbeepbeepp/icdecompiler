@@ -58,14 +58,18 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
   if (!aType.hasStaticShape() || !bType.hasStaticShape())
     return failure();
 
-  int64_t M = aType.getShape()[0];
-  int64_t K = aType.getShape()[1];
-  int64_t N = bType.getShape()[1];
-
-  // only 8x8 tiles map to the systolic array; anything else falls back to CPU
-  constexpr int64_t kArraySize = 8;
-  if (M != kArraySize || K != kArraySize || N != kArraySize)
+// matmul dims live in the last two axes; leading axes are batch
+  if (aType.getRank() < 2 || bType.getRank() < 2)
     return failure();
+
+  auto aShape = aType.getShape();
+  auto bShape = bType.getShape();
+  int64_t M = aShape[aType.getRank() - 2];
+  int64_t K = aShape[aType.getRank() - 1];
+  int64_t N = bShape[bType.getRank() - 1];
+  
+  // the driver tiles internally and pads partial tiles,
+  // so any static M/K/N is acceptable
 
   // materialize M, K, N as i32 constants
   auto i32Type = rewriter.getI32Type();
