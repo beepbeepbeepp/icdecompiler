@@ -106,6 +106,15 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
 // convert each buffer to a flat C pointer: &arr[0]...[0]
   auto toPointer = [&](Value v) -> Value {
     Value base = unwrap(v);
+
+    // if still a memref, cast it to an equivalent emitc.array first
+    if (auto memrefType = dyn_cast<MemRefType>(base.getType())) {
+      if (!memrefType.hasStaticShape())
+        return Value();
+      auto arrTy = emitc::ArrayType::get(memrefType.getShape(), memrefType.getElementType());
+      base = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), arrTy, base).getResult(0);
+    }
+    
     auto arrType = dyn_cast<emitc::ArrayType>(base.getType());
     if (!arrType)
       return Value();
