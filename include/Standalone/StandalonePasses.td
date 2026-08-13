@@ -32,4 +32,10 @@ def MatmulToSystolic : Pass<"icdec-matmul-to-systolic", "::mlir::ModuleOp"> {
   let dependentDialects = ["mlir::emitc::EmitCDialect"];
 }
 
+def IcdecCompile : Pass<"icdec-compile", "::mlir::ModuleOp"> {
+  let summary = "Full ICDeCompiler pipeline: linalg to C with systolic offload";
+  let description = [{Runs the complete lowering chain: matmul ops are offloaded to the systolic array driver, remaining ops are lowered to C loops via emitC.}];
+  let dependentDialects = ["mlir::emitc::EmitCDialect"];
+}
+
 #endif // STANDALONE_PASS

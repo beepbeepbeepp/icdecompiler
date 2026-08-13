@@ -12,12 +12,17 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Rewrite/FrozenRewritePatternSet.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Conversion/Passes.h"
+#include "mlir/Dialect/Linalg/Passes.h"
+#include "mlir/Dialect/Affine/Transforms/Passes.h"
 
 #include "Standalone/StandalonePasses.h"
 
 namespace mlir::standalone {
 #define GEN_PASS_DEF_STANDALONESWITCHBARFOO
 #define GEN_PASS_DEF_MATMULTOSYSTOLIC
+#define GEN_PASS_DEF_ICDECCOMPILE
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -222,6 +227,29 @@ public:
     patterns.add<GenericMatmulToSystolicRewriter>(&getContext());
     FrozenRewritePatternSet patternSet(std::move(patterns));
     if (failed(applyPatternsGreedily(getOperation(), patternSet)))
+      signalPassFailure();
+  }
+};
+
+class IcdecCompile : public impl::IcdecCompileBase<IcdecCompile> {
+public:
+  using impl::IcdecCompileBase<IcdecCompile>::IcdecCompileBase;
+
+  void runOnOperation() final {
+    OpPassManager pm("builtin.module");
+
+    // offload matmul to the systolic array driver
+    pm.addPass(createMatmulToSystolic());
+
+    // lower everything else to loops
+    pm.addPass(createConvertLinalgToLoopsPass());
+    pm.addPass(createLowerAffinePass());
+
+    // convert to emitc and clean up
+    pm.addPass(createConvertToEmitC());
+    pm.addPass(createReconcileUnrealizedCastsPass());
+
+    if (failed(runPipeline(pm, getOperation())))
       signalPassFailure();
   }
 };
