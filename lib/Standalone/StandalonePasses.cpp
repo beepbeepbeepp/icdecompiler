@@ -153,6 +153,12 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
       rewriter.getStringAttr("systolic_multiply_large"),
       args);
 
+  // block until the array finishes before anyone reads the result
+  auto timeoutAttr = rewriter.getI32IntegerAttr(10000);
+  Value timeout = rewriter.create<emitc::ConstantOp>(op->getLoc(), i32Type, timeoutAttr);
+  SmallVector<Value> waitArgs{timeout};
+  rewriter.create<emitc::CallOpaqueOp>(op->getLoc(), TypeRange{},rewriter.getStringAttr("systolic_wait_done"),waitArgs);
+
   rewriter.eraseOp(op);
   return success();
 }
