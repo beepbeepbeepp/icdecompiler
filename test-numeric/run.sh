@@ -8,16 +8,23 @@ ROOT="$(dirname "$HERE")"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-INPUT="${1:-$ROOT/test-input/int_matmul.mlir}"
+run_case() {
+  local mlir="$1"
+  local driver="$2"
+  local name="$3"
 
-"$ROOT/icdecompiler" "$INPUT" -o "$TMP/body.c" > /dev/null
+  "$ROOT/icdecompiler" "$mlir" -o "$TMP/body.c" > /dev/null
 
-{
-  echo '#include <stdint.h>'
-  echo '#include <stddef.h>'
-  echo '#include "systolic_stub.h"'
-  cat "$TMP/body.c"
-} > "$TMP/gen.c"
+  {
+    echo '#include <stdint.h>'
+    echo '#include <stddef.h>'
+    echo '#include "systolic_stub.h"'
+    cat "$TMP/body.c"
+  } > "$TMP/gen.c"
 
-gcc "$TMP/gen.c" "$HERE/main.c" -I"$HERE" -o "$TMP/numtest"
-"$TMP/numtest"
+  gcc "$TMP/gen.c" "$HERE/$driver" -I"$HERE" -o "$TMP/test_$name"
+  "$TMP/test_$name"
+}
+
+run_case "$ROOT/test-input/int_matmul.mlir"      main.c      square
+run_case "$ROOT/test-input/int_matmul_rect.mlir" main_rect.c rect
