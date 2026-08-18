@@ -112,6 +112,10 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
   auto toPointer = [&](Value v) -> Value {
     Value base = unwrap(v);
 
+    // already a pointer (e.g from memref.alloc): use it directly
+    if (isa<emitc::PointerType>(base.getType()))
+      return base;
+
     // if still a memref, cast it to an equivalent emitc.array first
     if (auto memrefType = dyn_cast<MemRefType>(base.getType())) {
       if (!memrefType.hasStaticShape())
