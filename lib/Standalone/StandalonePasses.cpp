@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -16,6 +17,9 @@
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/Affine/Transforms/Passes.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Transforms/Passes.h"
 
 #include "Standalone/StandalonePasses.h"
 
@@ -241,6 +245,13 @@ public:
 
   void runOnOperation() final {
     OpPassManager pm("builtin.module");
+
+    // bufferize: tensor -> memref
+    bufferization::OneShotBufferizePassOptions bufOpts;
+    bufOpts.bufferizeFunctionBoundaries = true;
+    bufOpts.functionBoundaryTypeConversion = bufferization::LayoutMapOption::IdentityLayoutMap;
+    pm.addPass(bufferization::createOneShotBufferizePass(bufOpts));
+    pm.addPass(createCanonicalizerPass());
 
     // offload matmul to the systolic array driver
     pm.addPass(createMatmulToSystolic());
