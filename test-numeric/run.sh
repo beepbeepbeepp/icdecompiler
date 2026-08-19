@@ -28,3 +28,4 @@ run_case() {
 
 run_case "$ROOT/test-input/int_matmul.mlir"      main.c      square
 run_case "$ROOT/test-input/int_matmul_rect.mlir" main_rect.c rect
+run_case "$ROOT/test-input/tosa_matmul_i16.mlir"  main_batch.c batch
