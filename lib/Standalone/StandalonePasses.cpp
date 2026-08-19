@@ -20,6 +20,7 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Transforms/Passes.h"
+#include "mlir/Conversion/TosaToLinalg/TosaToLinalg.h"
 
 #include "Standalone/StandalonePasses.h"
 
@@ -245,6 +246,11 @@ public:
 
   void runOnOperation() final {
     OpPassManager pm("builtin.module");
+
+    // lower TOSA to linalg
+    pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalgNamed());
+    pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalg());
+    pm.addPass(bufferization::createEmptyTensorEliminationPass());
 
     // bufferize: tensor -> memref
     bufferization::OneShotBufferizePassOptions bufOpts;
