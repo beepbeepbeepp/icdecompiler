@@ -225,6 +225,22 @@ public:
     return rewriteToSystolicCall(op, op.getInputs(), op.getOutputs(), rewriter);
   }
 };
+
+class BatchMatmulToSystolicRewriter
+    : public OpRewritePattern<linalg::BatchMatmulOp> {
+public:
+  using OpRewritePattern<linalg::BatchMatmulOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::BatchMatmulOp op, PatternRewriter &rewriter) const final {
+    // only single-batch is supported: the driver has no batch concept
+    auto aType = dyn_cast<MemRefType>(op.getInputs()[0].getType());
+    if (!aType || aType.getRank() != 3 || aType.getShape()[0] != 1)
+      return failure();
+
+    return rewriteToSystolicCall(op, op.getInputs(), op.getOutputs(), rewriter);
+  }
+};
+
 class MatmulToSystolic
     : public impl::MatmulToSystolicBase<MatmulToSystolic> {
 public:
@@ -234,6 +250,7 @@ public:
     RewritePatternSet patterns(&getContext());
     patterns.add<MatmulToSystolicRewriter>(&getContext());
     patterns.add<GenericMatmulToSystolicRewriter>(&getContext());
+    patterns.add<BatchMatmulToSystolicRewriter>(&getContext());
     FrozenRewritePatternSet patternSet(std::move(patterns));
     if (failed(applyPatternsGreedily(getOperation(), patternSet)))
       signalPassFailure();
