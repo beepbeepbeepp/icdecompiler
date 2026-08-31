@@ -29,6 +29,7 @@ namespace mlir::standalone {
 #define GEN_PASS_DEF_MATMULTOSYSTOLIC
 #define GEN_PASS_DEF_ICDECCOMPILE
 #define GEN_PASS_DEF_ICDECCOMPILECPU
+#define GEN_PASS_DEF_ELIDECOPYALLOC
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -258,6 +259,47 @@ public:
   }
 };
 
+// Removes temp buffers that are only written and then copied out wholesale.
+// Redirects the writes straight into the copy destination.
+class ElideCopyAlloc : public impl::ElideCopyAllocBase<ElideCopyAlloc> {
+public:
+  using impl::ElideCopyAllocBase<ElideCopyAlloc>::ElideCopyAllocBase;
+
+  void runOnOperation() final {
+    func::FuncOp fn = getOperation();
+    SmallVector<std::pair<memref::AllocOp, memref::CopyOp>> work;
+
+    fn.walk([&](memref::AllocOp alloc) {
+      memref::CopyOp theCopy;
+      for (Operation *user : alloc->getUsers()) {
+        auto copy = dyn_cast<memref::CopyOp>(user);
+        if (!copy || copy.getSource() != alloc.getResult())
+          continue;
+        if (theCopy)
+          return;              // more than one copy: leave it alone
+        theCopy = copy;
+      }
+      if (!theCopy)
+        return;
+      // types must match exactly so the redirect is safe
+      if (theCopy.getTarget().getType() != alloc.getType())
+        return;
+      work.push_back({alloc, theCopy});
+    });
+
+    for (auto [alloc, copy] : work) {
+      Value dst = copy.getTarget();
+      // the destination must not be produced after the alloc
+      if (Operation *def = dst.getDefiningOp())
+        if (!def->isBeforeInBlock(alloc))
+          continue;
+      alloc.getResult().replaceAllUsesWith(dst);
+      copy.erase();
+      alloc.erase();
+    }
+  }
+};
+
 // Shared pipeline. When `offloadMatmul` is false, everything runs on the CPU.
 static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalgNamed());
@@ -276,6 +318,7 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
 
   pm.addPass(createConvertLinalgToLoopsPass());
   pm.addPass(createLowerAffinePass());
+  pm.addNestedPass<func::FuncOp>(createElideCopyAlloc());
   pm.addPass(createConvertToEmitC());
   pm.addPass(createReconcileUnrealizedCastsPass());
 }

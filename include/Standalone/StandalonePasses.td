@@ -53,4 +53,16 @@ def IcdecCompileCpu : Pass<"icdec-compile-cpu", "::mlir::ModuleOp"> {
     "mlir::affine::AffineDialect"
   ];
 }
+
+def ElideCopyAlloc : Pass<"icdec-elide-copy-alloc", "::mlir::func::FuncOp"> {
+  let summary = "Remove temp buffers that are only written then copied out";
+  let description = [{
+    Rewrites the pattern where a memref.alloc is filled by loops and then
+    copied wholesale into another buffer: the loops are redirected to write
+    directly into the destination, and both the alloc and the copy are erased.
+    This keeps generated C free of heap allocations for such buffers.
+  }];
+  let dependentDialects = ["mlir::memref::MemRefDialect"];
+}
+
 #endif // STANDALONE_PASS
