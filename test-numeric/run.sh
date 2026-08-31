@@ -12,8 +12,9 @@ run_case() {
   local mlir="$1"
   local driver="$2"
   local name="$3"
+  local mode="${4:-}"
 
-  "$ROOT/icdecompiler" "$mlir" -o "$TMP/body.c" > /dev/null
+  "$ROOT/icdecompiler" "$mlir" $mode -o "$TMP/body.c" > /dev/null
 
   {
     echo '#include <stdint.h>'
@@ -26,6 +27,7 @@ run_case() {
   "$TMP/test_$name"
 }
 
-run_case "$ROOT/test-input/int_matmul.mlir"      main.c      square
-run_case "$ROOT/test-input/int_matmul_rect.mlir" main_rect.c rect
+run_case "$ROOT/test-input/int_matmul.mlir"       main.c       square
+run_case "$ROOT/test-input/int_matmul_rect.mlir"  main_rect.c  rect
 run_case "$ROOT/test-input/tosa_matmul_i16.mlir"  main_batch.c batch
+run_case "$ROOT/test-input/int_matmul.mlir"       main.c       square_cpu --cpu
