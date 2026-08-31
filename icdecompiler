@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# ICDeCompiler: lower MLIR (linalg on memref) to C with systolic array offload
+# ICDeCompiler: lower MLIR (TOSA or linalg) to C.
+# Default target offloads matmul to the systolic array; --cpu keeps everything on CPU.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,23 +8,25 @@ OPT="$HERE/build/bin/standalone-opt"
 TRANSLATE="$HERE/build/bin/standalone-translate"
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: icdecompiler <input.mlir> [-o output.c]" >&2
+  echo "usage: icdecompiler <input.mlir> [-o output.c] [--cpu]" >&2
   exit 1
 fi
 
 INPUT="$1"; shift
 OUTPUT=""
+PASS="--icdec-compile"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -o) OUTPUT="$2"; shift 2 ;;
-    *)  echo "unknown option: $1" >&2; exit 1 ;;
+    -o)    OUTPUT="$2"; shift 2 ;;
+    --cpu) PASS="--icdec-compile-cpu"; shift ;;
+    *)     echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
 if [[ -n "$OUTPUT" ]]; then
-  "$OPT" "$INPUT" --icdec-compile | "$TRANSLATE" --mlir-to-cpp > "$OUTPUT"
+  "$OPT" "$INPUT" "$PASS" | "$TRANSLATE" --mlir-to-cpp > "$OUTPUT"
   echo "wrote $OUTPUT"
 else
-  "$OPT" "$INPUT" --icdec-compile | "$TRANSLATE" --mlir-to-cpp
+  "$OPT" "$INPUT" "$PASS" | "$TRANSLATE" --mlir-to-cpp
 fi

@@ -38,4 +38,19 @@ def IcdecCompile : Pass<"icdec-compile", "::mlir::ModuleOp"> {
   let dependentDialects = ["mlir::emitc::EmitCDialect", "mlir::bufferization::BufferizationDialect", "mlir::memref::MemRefDialect", "mlir::scf::SCFDialect", "mlir::affine::AffineDialect"];
 }
 
+def IcdecCompileCpu : Pass<"icdec-compile-cpu", "::mlir::ModuleOp"> {
+  let summary = "Lower to plain C without systolic array offload";
+  let description = [{
+    Same pipeline as icdec-compile but skips the matmul offload pass, so every
+    operation is lowered to C loops executed on the CPU. Used for targets
+    without the systolic array.
+  }];
+  let dependentDialects = [
+    "mlir::emitc::EmitCDialect",
+    "mlir::bufferization::BufferizationDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::affine::AffineDialect"
+  ];
+}
 #endif // STANDALONE_PASS

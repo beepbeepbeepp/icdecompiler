@@ -28,6 +28,7 @@ namespace mlir::standalone {
 #define GEN_PASS_DEF_STANDALONESWITCHBARFOO
 #define GEN_PASS_DEF_MATMULTOSYSTOLIC
 #define GEN_PASS_DEF_ICDECCOMPILE
+#define GEN_PASS_DEF_ICDECCOMPILECPU
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -257,36 +258,47 @@ public:
   }
 };
 
+// Shared pipeline. When `offloadMatmul` is false, everything runs on the CPU.
+static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
+  pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalgNamed());
+  pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalg());
+  pm.addPass(bufferization::createEmptyTensorEliminationPass());
+
+  bufferization::OneShotBufferizePassOptions bufOpts;
+  bufOpts.bufferizeFunctionBoundaries = true;
+  bufOpts.functionBoundaryTypeConversion =
+      bufferization::LayoutMapOption::IdentityLayoutMap;
+  pm.addPass(bufferization::createOneShotBufferizePass(bufOpts));
+  pm.addPass(createCanonicalizerPass());
+
+  if (offloadMatmul)
+    pm.addPass(createMatmulToSystolic());
+
+  pm.addPass(createConvertLinalgToLoopsPass());
+  pm.addPass(createLowerAffinePass());
+  pm.addPass(createConvertToEmitC());
+  pm.addPass(createReconcileUnrealizedCastsPass());
+}
+
 class IcdecCompile : public impl::IcdecCompileBase<IcdecCompile> {
 public:
   using impl::IcdecCompileBase<IcdecCompile>::IcdecCompileBase;
 
   void runOnOperation() final {
     OpPassManager pm("builtin.module");
+    buildIcdecPipeline(pm, /*offloadMatmul=*/true);
+    if (failed(runPipeline(pm, getOperation())))
+      signalPassFailure();
+  }
+};
 
-    // lower TOSA to linalg
-    pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalgNamed());
-    pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalg());
-    pm.addPass(bufferization::createEmptyTensorEliminationPass());
+class IcdecCompileCpu : public impl::IcdecCompileCpuBase<IcdecCompileCpu> {
+public:
+  using impl::IcdecCompileCpuBase<IcdecCompileCpu>::IcdecCompileCpuBase;
 
-    // bufferize: tensor -> memref
-    bufferization::OneShotBufferizePassOptions bufOpts;
-    bufOpts.bufferizeFunctionBoundaries = true;
-    bufOpts.functionBoundaryTypeConversion = bufferization::LayoutMapOption::IdentityLayoutMap;
-    pm.addPass(bufferization::createOneShotBufferizePass(bufOpts));
-    pm.addPass(createCanonicalizerPass());
-
-    // offload matmul to the systolic array driver
-    pm.addPass(createMatmulToSystolic());
-
-    // lower everything else to loops
-    pm.addPass(createConvertLinalgToLoopsPass());
-    pm.addPass(createLowerAffinePass());
-
-    // convert to emitc and clean up
-    pm.addPass(createConvertToEmitC());
-    pm.addPass(createReconcileUnrealizedCastsPass());
-
+  void runOnOperation() final {
+    OpPassManager pm("builtin.module");
+    buildIcdecPipeline(pm, /*offloadMatmul=*/false);
     if (failed(runPipeline(pm, getOperation())))
       signalPassFailure();
   }
