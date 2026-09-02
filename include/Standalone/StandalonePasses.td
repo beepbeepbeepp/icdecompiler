@@ -65,4 +65,14 @@ def ElideCopyAlloc : Pass<"icdec-elide-copy-alloc", "::mlir::func::FuncOp"> {
   let dependentDialects = ["mlir::memref::MemRefDialect"];
 }
 
+def OutParam : Pass<"icdec-out-param", "::mlir::ModuleOp"> {
+  let summary = "Turn memref return values into output parameters";
+  let description = [{
+    Rewrites functions that return memrefs so the results become trailing
+    parameters instead. Emitted C cannot return arrays, and bare-metal targets
+    expect the caller to supply the output buffer.
+  }];
+  let dependentDialects = ["mlir::memref::MemRefDialect"];
+}
+
 #endif // STANDALONE_PASS

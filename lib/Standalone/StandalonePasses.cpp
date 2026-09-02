@@ -32,6 +32,7 @@ namespace mlir::standalone {
 #define GEN_PASS_DEF_ICDECCOMPILE
 #define GEN_PASS_DEF_ICDECCOMPILECPU
 #define GEN_PASS_DEF_ELIDECOPYALLOC
+#define GEN_PASS_DEF_OUTPARAM
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -261,6 +262,50 @@ public:
   }
 };
 
+// Turns memref return values into trailing output parameters, since C cannot
+// return arrays and bare-metal callers supply the output buffer themselves.
+class OutParam : public impl::OutParamBase<OutParam> {
+public:
+  using impl::OutParamBase<OutParam>::OutParamBase;
+
+  void runOnOperation() final {
+    ModuleOp mod = getOperation();
+
+    mod.walk([&](func::FuncOp fn) {
+      if (fn.isExternal())
+        return;
+      auto resultTypes = fn.getFunctionType().getResults();
+      if (resultTypes.empty())
+        return;
+      // only handle the all-memref case
+      for (Type t : resultTypes)
+        if (!isa<MemRefType>(t))
+          return;
+
+      Block &entry = fn.getBody().front();
+      SmallVector<Value> outArgs;
+      for (Type t : resultTypes)
+        outArgs.push_back(entry.addArgument(t, fn.getLoc()));
+
+      SmallVector<func::ReturnOp> returns;
+      fn.walk([&](func::ReturnOp ret) { returns.push_back(ret); });
+
+      OpBuilder builder(fn.getContext());
+      for (func::ReturnOp ret : returns) {
+        builder.setInsertionPoint(ret);
+        for (auto [val, out] : llvm::zip(ret.getOperands(), outArgs))
+          if (val != out)
+            builder.create<memref::CopyOp>(ret.getLoc(), val, out);
+        builder.create<func::ReturnOp>(ret.getLoc());
+        ret.erase();
+      }
+
+      SmallVector<Type> argTypes(entry.getArgumentTypes());
+      fn.setType(builder.getFunctionType(argTypes, {}));
+    });
+  }
+};
+
 // Removes temp buffers that are only written and then copied out wholesale.
 // Redirects the writes straight into the copy destination.
 class ElideCopyAlloc : public impl::ElideCopyAllocBase<ElideCopyAlloc> {
@@ -318,6 +363,7 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   bufOpts.functionBoundaryTypeConversion = bufferization::LayoutMapOption::IdentityLayoutMap;
   pm.addPass(bufferization::createOneShotBufferizePass(bufOpts));
   pm.addPass(createCanonicalizerPass());
+  pm.addPass(createOutParam());
 
   // turn subviews from padding into reinterpret_casts, then drop them
   pm.addNestedPass<func::FuncOp>(memref::createExpandStridedMetadataPass());
