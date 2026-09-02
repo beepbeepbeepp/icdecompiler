@@ -19,6 +19,8 @@
 #include "mlir/Dialect/Affine/Transforms/Passes.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Conversion/TosaToLinalg/TosaToLinalg.h"
 
@@ -302,23 +304,41 @@ public:
 
 // Shared pipeline. When `offloadMatmul` is false, everything runs on the CPU.
 static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
+  // TOSA -> linalg, including shape and constant lowering
   pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalgNamed());
   pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalg());
-  pm.addPass(bufferization::createEmptyTensorEliminationPass());
+  pm.addNestedPass<func::FuncOp>(createTosaToTensorPass());
+  pm.addNestedPass<func::FuncOp>(createTosaToArithPass());
+  pm.addPass(createCanonicalizerPass());
 
+  // tensor -> memref
+  pm.addPass(bufferization::createEmptyTensorEliminationPass());
   bufferization::OneShotBufferizePassOptions bufOpts;
   bufOpts.bufferizeFunctionBoundaries = true;
-  bufOpts.functionBoundaryTypeConversion =
-      bufferization::LayoutMapOption::IdentityLayoutMap;
+  bufOpts.functionBoundaryTypeConversion = bufferization::LayoutMapOption::IdentityLayoutMap;
   pm.addPass(bufferization::createOneShotBufferizePass(bufOpts));
   pm.addPass(createCanonicalizerPass());
+
+  // turn subviews from padding into reinterpret_casts, then drop them
+  pm.addNestedPass<func::FuncOp>(memref::createExpandStridedMetadataPass());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(memref::createElideReinterpretCastPass());
 
   if (offloadMatmul)
     pm.addPass(createMatmulToSystolic());
 
+  // lower everything else to loops
   pm.addPass(createConvertLinalgToLoopsPass());
   pm.addPass(createLowerAffinePass());
+  pm.addNestedPass<func::FuncOp>(arith::createArithExpandOpsPass());
+
+  // second cleanup round: casts that only appear after loop lowering
+  pm.addPass(memref::createElideReinterpretCastPass());
+  pm.addNestedPass<func::FuncOp>(memref::createFoldMemRefAliasOpsPass());
+  pm.addPass(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(createElideCopyAlloc());
+
+  // convert to emitc and clean up
   pm.addPass(createConvertToEmitC());
   pm.addPass(createReconcileUnrealizedCastsPass());
 }
