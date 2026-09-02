@@ -75,4 +75,14 @@ def OutParam : Pass<"icdec-out-param", "::mlir::ModuleOp"> {
   let dependentDialects = ["mlir::memref::MemRefDialect"];
 }
 
+def AddIncludes : Pass<"icdec-add-includes", "::mlir::ModuleOp"> {
+  let summary = "Insert the C headers the generated code needs";
+  let description = [{
+    Emitted code uses size_t, bool and heap allocation but does not declare the
+    headers that provide them. This pass prepends the required includes so the
+    output compiles as-is.
+  }];
+  let dependentDialects = ["mlir::emitc::EmitCDialect"];
+}
+
 #endif // STANDALONE_PASS

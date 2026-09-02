@@ -33,6 +33,7 @@ namespace mlir::standalone {
 #define GEN_PASS_DEF_ICDECCOMPILECPU
 #define GEN_PASS_DEF_ELIDECOPYALLOC
 #define GEN_PASS_DEF_OUTPARAM
+#define GEN_PASS_DEF_ADDINCLUDES
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -262,6 +263,33 @@ public:
   }
 };
 
+// Prepends the C headers the emitted code relies on. Existing includes are
+// left alone so a model can still pull in its own driver header.
+class AddIncludes : public impl::AddIncludesBase<AddIncludes> {
+public:
+  using impl::AddIncludesBase<AddIncludes>::AddIncludesBase;
+
+  void runOnOperation() final {
+    ModuleOp mod = getOperation();
+
+    llvm::SmallDenseSet<StringRef> present;
+    mod.walk([&](emitc::IncludeOp inc) { present.insert(inc.getInclude()); });
+
+    static constexpr StringRef needed[] = {
+        "stdint.h", "stddef.h", "stdbool.h", "stdlib.h"};
+
+    OpBuilder builder(mod.getBodyRegion());
+    builder.setInsertionPointToStart(mod.getBody());
+    for (StringRef hdr : llvm::reverse(ArrayRef<StringRef>(needed))) {
+      if (present.contains(hdr))
+        continue;
+      builder.create<emitc::IncludeOp>(mod.getLoc(),
+                                       builder.getStringAttr(hdr),
+                                       /*is_standard_include=*/builder.getUnitAttr());
+    }
+  }
+};
+
 // Turns memref return values into trailing output parameters, since C cannot
 // return arrays and bare-metal callers supply the output buffer themselves.
 class OutParam : public impl::OutParamBase<OutParam> {
@@ -384,6 +412,7 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addPass(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(createElideCopyAlloc());
   pm.addPass(createSymbolDCEPass());
+  pm.addPass(createAddIncludes());
 
   // convert to emitc and clean up
   pm.addPass(createConvertToEmitC());
