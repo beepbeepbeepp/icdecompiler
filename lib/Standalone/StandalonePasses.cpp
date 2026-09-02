@@ -383,6 +383,7 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addNestedPass<func::FuncOp>(memref::createFoldMemRefAliasOpsPass());
   pm.addPass(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(createElideCopyAlloc());
+  pm.addPass(createSymbolDCEPass());
 
   // convert to emitc and clean up
   pm.addPass(createConvertToEmitC());
