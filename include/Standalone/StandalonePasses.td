@@ -95,4 +95,15 @@ def ExpandIntMinMax : Pass<"icdec-expand-int-minmax", "::mlir::ModuleOp"> {
   let dependentDialects = ["mlir::arith::ArithDialect"];
 }
 
+def GlobalToEmitC : Pass<"icdec-global-to-emitc", "::mlir::ModuleOp"> {
+  let summary = "Convert constant memref globals into emitc globals";
+  let description = [{
+    The bundled emitc conversion rewrites memref.get_global into
+    emitc.get_global but leaves the memref.global declaration behind, so the
+    symbol no longer resolves. Quantized models hit this because rescale
+    parameters become constant globals. This pass converts the declarations.
+  }];
+  let dependentDialects = ["mlir::emitc::EmitCDialect", "mlir::memref::MemRefDialect"];
+}
+
 #endif // STANDALONE_PASS

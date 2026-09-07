@@ -35,6 +35,7 @@ namespace mlir::standalone {
 #define GEN_PASS_DEF_OUTPARAM
 #define GEN_PASS_DEF_ADDINCLUDES
 #define GEN_PASS_DEF_EXPANDINTMINMAX
+#define GEN_PASS_DEF_GLOBALTOEMITC
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -410,6 +411,56 @@ public:
   }
 };
 
+// The bundled emitc conversion rewrites memref.get_global but leaves the
+// memref.global declaration behind. Convert those declarations so the symbols
+// resolve again.
+class GlobalToEmitC : public impl::GlobalToEmitCBase<GlobalToEmitC> {
+public:
+  using impl::GlobalToEmitCBase<GlobalToEmitC>::GlobalToEmitCBase;
+
+  void runOnOperation() final {
+    ModuleOp mod = getOperation();
+    OpBuilder builder(mod.getContext());
+
+    // rewrite the readers first, so the declarations are unused when replaced
+    SmallVector<memref::GetGlobalOp> readers;
+    mod.walk([&](memref::GetGlobalOp g) { readers.push_back(g); });
+
+    for (memref::GetGlobalOp g : readers) {
+      auto memrefTy = dyn_cast<MemRefType>(g.getType());
+      if (!memrefTy || !memrefTy.hasStaticShape())
+        continue;
+      auto arrayTy = emitc::ArrayType::get(memrefTy.getShape(),
+                                           memrefTy.getElementType());
+      builder.setInsertionPoint(g);
+      Value repl = builder.create<emitc::GetGlobalOp>(g.getLoc(), arrayTy,
+                                                      g.getNameAttr());
+      Value cast = builder.create<UnrealizedConversionCastOp>(
+                       g.getLoc(), memrefTy, repl).getResult(0);
+      g.getResult().replaceAllUsesWith(cast);
+      g.erase();
+    }
+
+    SmallVector<memref::GlobalOp> decls;
+    mod.walk([&](memref::GlobalOp g) { decls.push_back(g); });
+
+    for (memref::GlobalOp g : decls) {
+      auto memrefTy = g.getType();
+      if (!memrefTy.hasStaticShape())
+        continue;
+      auto arrayTy = emitc::ArrayType::get(memrefTy.getShape(),
+                                           memrefTy.getElementType());
+      builder.setInsertionPoint(g);
+      builder.create<emitc::GlobalOp>(
+          g.getLoc(), g.getSymName(), arrayTy, g.getInitialValueAttr(),
+          /*extern_specifier=*/false,
+          /*static_specifier=*/true,
+          /*const_specifier=*/g.getConstant());
+      g.erase();
+    }
+  }
+};
+
 // Shared pipeline. When `offloadMatmul` is false, everything runs on the CPU.
 static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   // TOSA -> linalg, including shape and constant lowering
@@ -452,14 +503,15 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addNestedPass<func::FuncOp>(memref::createFoldMemRefAliasOpsPass());
   pm.addPass(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(createElideCopyAlloc());
-  pm.addPass(createSymbolDCEPass());
   pm.addPass(createAddIncludes());
 
   // convert to emitc and clean up
+  pm.addPass(createGlobalToEmitC());
   pm.addPass(createConvertToEmitC());
   pm.addPass(createExpandIntMinMax());
   pm.addNestedPass<emitc::FuncOp>(createConvertArithToEmitC());
   pm.addPass(createReconcileUnrealizedCastsPass());
+  pm.addPass(createSymbolDCEPass());
 }
 
 class IcdecCompile : public impl::IcdecCompileBase<IcdecCompile> {
