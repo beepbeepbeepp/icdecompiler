@@ -34,6 +34,7 @@ namespace mlir::standalone {
 #define GEN_PASS_DEF_ELIDECOPYALLOC
 #define GEN_PASS_DEF_OUTPARAM
 #define GEN_PASS_DEF_ADDINCLUDES
+#define GEN_PASS_DEF_EXPANDINTMINMAX
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -375,13 +376,52 @@ public:
   }
 };
 
+// EmitC cannot lower integer min and max, which quantized models produce from
+// clamp. Rewrite them into a comparison plus select, both of which it supports.
+class ExpandIntMinMax : public impl::ExpandIntMinMaxBase<ExpandIntMinMax> {
+public:
+  using impl::ExpandIntMinMaxBase<ExpandIntMinMax>::ExpandIntMinMaxBase;
+
+  void runOnOperation() final {
+    ModuleOp mod = getOperation();
+    OpBuilder builder(mod.getContext());
+
+    SmallVector<Operation *> work;
+    mod.walk([&](Operation *op) {
+      if (isa<arith::MaxSIOp, arith::MinSIOp, arith::MaxUIOp, arith::MinUIOp>(op))
+        work.push_back(op);
+    });
+
+    for (Operation *op : work) {
+      builder.setInsertionPoint(op);
+      Value lhs = op->getOperand(0), rhs = op->getOperand(1);
+
+      arith::CmpIPredicate pred;
+      if (isa<arith::MaxSIOp>(op))      pred = arith::CmpIPredicate::sgt;
+      else if (isa<arith::MinSIOp>(op)) pred = arith::CmpIPredicate::slt;
+      else if (isa<arith::MaxUIOp>(op)) pred = arith::CmpIPredicate::ugt;
+      else                              pred = arith::CmpIPredicate::ult;
+
+      Value cond = builder.create<arith::CmpIOp>(op->getLoc(), pred, lhs, rhs);
+      Value sel = builder.create<arith::SelectOp>(op->getLoc(), cond, lhs, rhs);
+      op->getResult(0).replaceAllUsesWith(sel);
+      op->erase();
+    }
+  }
+};
+
 // Shared pipeline. When `offloadMatmul` is false, everything runs on the CPU.
 static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   // TOSA -> linalg, including shape and constant lowering
   pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalgNamed());
   pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalg());
   pm.addNestedPass<func::FuncOp>(createTosaToTensorPass());
-  pm.addNestedPass<func::FuncOp>(createTosaToArithPass());
+  {
+    TosaToArithPassOptions opts;
+    opts.includeApplyRescale = true;
+    pm.addNestedPass<func::FuncOp>(createTosaToArithPass(opts));
+  }
+  pm.addPass(createExpandIntMinMax());
   pm.addPass(createCanonicalizerPass());
 
   // tensor -> memref
@@ -405,6 +445,7 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addPass(createConvertLinalgToLoopsPass());
   pm.addPass(createLowerAffinePass());
   pm.addNestedPass<func::FuncOp>(arith::createArithExpandOpsPass());
+  pm.addPass(createExpandIntMinMax());
 
   // second cleanup round: casts that only appear after loop lowering
   pm.addPass(memref::createElideReinterpretCastPass());
@@ -416,6 +457,8 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
 
   // convert to emitc and clean up
   pm.addPass(createConvertToEmitC());
+  pm.addPass(createExpandIntMinMax());
+  pm.addNestedPass<emitc::FuncOp>(createConvertArithToEmitC());
   pm.addPass(createReconcileUnrealizedCastsPass());
 }
 

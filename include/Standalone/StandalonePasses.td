@@ -85,4 +85,14 @@ def AddIncludes : Pass<"icdec-add-includes", "::mlir::ModuleOp"> {
   let dependentDialects = ["mlir::emitc::EmitCDialect"];
 }
 
+def ExpandIntMinMax : Pass<"icdec-expand-int-minmax", "::mlir::ModuleOp"> {
+  let summary = "Rewrite arith.maxsi and arith.minsi into compare and select";
+  let description = [{
+    EmitC has no lowering for integer min and max, but quantized models produce
+    them from clamp operations. This pass expands them into a comparison
+    followed by a select, both of which EmitC supports.
+  }];
+  let dependentDialects = ["mlir::arith::ArithDialect"];
+}
+
 #endif // STANDALONE_PASS
