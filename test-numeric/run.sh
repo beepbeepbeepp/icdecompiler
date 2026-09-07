@@ -32,3 +32,4 @@ run_case "$ROOT/test-input/int_matmul_rect.mlir"  main_rect.c  rect
 run_case "$ROOT/test-input/tosa_matmul_i16.mlir"  main_batch.c batch
 run_case "$ROOT/test-input/int_matmul.mlir"       main.c       square_cpu --cpu
 run_case "$ROOT/test-input/q88_requant.mlir"      main_q88.c   q88
+run_case "$ROOT/test-input/rescale.mlir"          main_rescale.c rescale --cpu
