@@ -1,0 +1,6 @@
+.venv/
+*.tflite
+*.c
+*.h
+*.json
+__pycache__/
