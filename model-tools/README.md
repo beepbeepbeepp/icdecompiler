@@ -14,6 +14,26 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install tflite numpy ai-edge-litert
 ```
+## Cara cepat
+
+Satu perintah untuk menghasilkan semua berkas:
+
+```bash
+./build_model.sh model_int8.tflite har -o output/
+```
+
+Menghasilkan:
+
+| Berkas | Isi |
+|---|---|
+| `har.mlir` | struktur model dalam TOSA |
+| `har.c` | kode inferensi |
+| `har_weights.c` `.h` | bobot dan parameter kuantisasi |
+
+Tambahkan `--array` kalau matmul mau diarahkan ke systolic array. Tanpa itu,
+semua dijalankan CPU.
+
+Bagian di bawah menjelaskan tiap langkahnya kalau perlu dijalankan terpisah.
 
 ## Ekstraksi bobot
 
