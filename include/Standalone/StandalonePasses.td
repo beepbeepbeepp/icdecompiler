@@ -106,4 +106,18 @@ def GlobalToEmitC : Pass<"icdec-global-to-emitc", "::mlir::ModuleOp"> {
   let dependentDialects = ["mlir::emitc::EmitCDialect", "mlir::memref::MemRefDialect"];
 }
 
+def AllocToGlobal : Pass<"icdec-alloc-to-global", "::mlir::ModuleOp"> {
+  let summary = "Turn static memref allocations into static globals";
+  let description = [{
+    Bare-metal targets have no heap worth using, and the bundled emitc
+    conversion cannot express the pointer-to-array cast that memref.alloc
+    produces. Replacing each statically shaped allocation with a module-level
+    global sidesteps both problems: the buffer lands in .bss and the generated
+    C needs no allocator.
+
+    Only allocations whose shape is fully static are converted.
+  }];
+  let dependentDialects = ["mlir::memref::MemRefDialect"];
+}
+
 #endif // STANDALONE_PASS

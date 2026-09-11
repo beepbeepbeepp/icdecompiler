@@ -36,6 +36,7 @@ namespace mlir::standalone {
 #define GEN_PASS_DEF_ADDINCLUDES
 #define GEN_PASS_DEF_EXPANDINTMINMAX
 #define GEN_PASS_DEF_GLOBALTOEMITC
+#define GEN_PASS_DEF_ALLOCTOGLOBAL
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -411,6 +412,56 @@ public:
   }
 };
 
+// Bare-metal targets have no usable heap, and the bundled emitc conversion
+// cannot express the pointer-to-array cast that memref.alloc produces.
+// Replacing each statically shaped allocation with a module-level global
+// sidesteps both: the buffer lands in .bss and no allocator is needed.
+class AllocToGlobal : public impl::AllocToGlobalBase<AllocToGlobal> {
+public:
+  using impl::AllocToGlobalBase<AllocToGlobal>::AllocToGlobalBase;
+
+  void runOnOperation() final {
+    ModuleOp mod = getOperation();
+    OpBuilder builder(mod.getContext());
+
+    SmallVector<memref::AllocOp> work;
+    mod.walk([&](memref::AllocOp a) {
+      if (a.getType().hasStaticShape() && a.getDynamicSizes().empty())
+        work.push_back(a);
+    });
+
+    unsigned counter = 0;
+    for (memref::AllocOp alloc : work) {
+      auto ty = alloc.getType();
+
+      std::string name = ("__icdec_buf" + Twine(counter++)).str();
+      builder.setInsertionPointToStart(mod.getBody());
+      builder.create<memref::GlobalOp>(
+          alloc.getLoc(),
+          name,
+          builder.getStringAttr("private"),
+          ty,
+          /*initial_value=*/Attribute(),
+          /*constant=*/false,
+          /*alignment=*/alloc.getAlignmentAttr());
+
+      builder.setInsertionPoint(alloc);
+      Value repl = builder.create<memref::GetGlobalOp>(alloc.getLoc(), ty, name);
+      alloc.getResult().replaceAllUsesWith(repl);
+      alloc.erase();
+    }
+
+    // any dealloc of those buffers is now meaningless
+    SmallVector<memref::DeallocOp> deallocs;
+    mod.walk([&](memref::DeallocOp d) {
+      if (d.getMemref().getDefiningOp<memref::GetGlobalOp>())
+        deallocs.push_back(d);
+    });
+    for (memref::DeallocOp d : deallocs)
+      d.erase();
+  }
+};
+
 // The bundled emitc conversion rewrites memref.get_global but leaves the
 // memref.global declaration behind. Convert those declarations so the symbols
 // resolve again.
@@ -489,8 +540,12 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addPass(createCanonicalizerPass());
   pm.addPass(memref::createElideReinterpretCastPass());
 
-  if (offloadMatmul)
+  if (offloadMatmul) {
     pm.addPass(createMatmulToSystolic());
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(memref::createElideReinterpretCastPass());
+    pm.addNestedPass<func::FuncOp>(createElideCopyAlloc());
+  }
 
   // lower everything else to loops
   pm.addPass(createConvertLinalgToLoopsPass());
@@ -503,15 +558,16 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addNestedPass<func::FuncOp>(memref::createFoldMemRefAliasOpsPass());
   pm.addPass(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(createElideCopyAlloc());
-  pm.addPass(createAddIncludes());
 
   // convert to emitc and clean up
+  pm.addPass(createAllocToGlobal());
   pm.addPass(createGlobalToEmitC());
   pm.addPass(createConvertToEmitC());
   pm.addPass(createExpandIntMinMax());
   pm.addNestedPass<emitc::FuncOp>(createConvertArithToEmitC());
   pm.addPass(createReconcileUnrealizedCastsPass());
   pm.addPass(createSymbolDCEPass());
+  pm.addPass(createAddIncludes());
 }
 
 class IcdecCompile : public impl::IcdecCompileBase<IcdecCompile> {
