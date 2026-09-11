@@ -179,18 +179,24 @@ def _maxpool1d(b, st, cfg):
 
 @handler("gap")
 def _gap(b, st, cfg):
-    """Average over length: sum in 32 bits, then divide by the count."""
+    """Average over length. Reshape to 3-D first so the reduction lands
+    directly on the shape the dense layers expect."""
     L, C = st["length"], st["channels"]
-    in_shape = [1, 1, L, C]
-    sum_shape = [1, 1, 1, C]
+
+    # [1,1,L,C] -> [1,L,C] before reducing, so no reshape is needed after
+    n_shape3 = b.const_shape([1, L, C])
+    n_3d = b.fresh("v")
+    b.emit(f"{n_3d} = tosa.reshape {st['cur']}, {n_shape3}"
+           f" : ({mlir_type([1, 1, L, C], 'i16')}, !tosa.shape<3>)"
+           f" -> {mlir_type([1, L, C], 'i16')}")
 
     n_wide = b.fresh("v")
-    b.emit(f"{n_wide} = tosa.cast {st['cur']}"
-           f" : ({mlir_type(in_shape, 'i16')}) -> {mlir_type(in_shape, 'i32')}")
+    b.emit(f"{n_wide} = tosa.cast {n_3d}"
+           f" : ({mlir_type([1, L, C], 'i16')}) -> {mlir_type([1, L, C], 'i32')}")
 
     n_sum = b.fresh("a")
-    b.emit(f"{n_sum} = tosa.reduce_sum {n_wide} {{axis = 2 : i32}}"
-           f" : ({mlir_type(in_shape, 'i32')}) -> {mlir_type(sum_shape, 'i32')}")
+    b.emit(f"{n_sum} = tosa.reduce_sum {n_wide} {{axis = 1 : i32}}"
+           f" : ({mlir_type([1, L, C], 'i32')}) -> {mlir_type([1, 1, C], 'i32')}")
 
     # dividing by L is a rescale whose multiplier is 2^31 / L
     mult = int(round((1 << 31) / L))
@@ -198,21 +204,14 @@ def _gap(b, st, cfg):
     n_shf = b.const([31], [1], "i8")
     n_izp = b.const([0], [1], "i32")
     n_ozp = b.const([0], [1], "i16")
-    n_rs = b.fresh("r")
-    b.emit(f"{n_rs} = tosa.rescale {n_sum}, {n_mul}, {n_shf}, {n_izp}, {n_ozp} {{"
+    n = b.fresh("r")
+    b.emit(f"{n} = tosa.rescale {n_sum}, {n_mul}, {n_shf}, {n_izp}, {n_ozp} {{"
            f" scale32 = true,"
            f" rounding_mode = #tosa.rounding_mode<SINGLE_ROUND>,"
            f" per_channel = false,"
            f" input_unsigned = false, output_unsigned = false }}"
-           f" : ({mlir_type(sum_shape, 'i32')}, tensor<1xi32>, tensor<1xi8>,"
-           f" tensor<1xi32>, tensor<1xi16>) -> {mlir_type(sum_shape, 'i16')}")
-
-    # drop the spatial dims so the dense layers see [1, 1, C]
-    n_shape = b.const_shape([1, 1, C])
-    n = b.fresh("v")
-    b.emit(f"{n} = tosa.reshape {n_rs}, {n_shape}"
-           f" : ({mlir_type(sum_shape, 'i16')}, !tosa.shape<3>)"
-           f" -> {mlir_type([1, 1, C], 'i16')}")
+           f" : ({mlir_type([1, 1, C], 'i32')}, tensor<1xi32>, tensor<1xi8>,"
+           f" tensor<1xi32>, tensor<1xi16>) -> {mlir_type([1, 1, C], 'i16')}")
 
     st["cur"] = n
     st["length"] = 1

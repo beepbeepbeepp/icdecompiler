@@ -29,18 +29,18 @@ module {
     %c34 = "tosa.const"() {values = dense<0> : tensor<1xi16>} : () -> tensor<1xi16>
     %r35 = tosa.rescale %a30, %c31, %c32, %c33, %c34 { scale32 = true, rounding_mode = #tosa.rounding_mode<SINGLE_ROUND>, per_channel = false, input_unsigned = false, output_unsigned = false } : (tensor<1x1x32x64xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi16>) -> tensor<1x1x32x64xi16>
     %v36 = tosa.clamp %r35 { min_val = 0 : i16, max_val = 32767 : i16 } : (tensor<1x1x32x64xi16>) -> tensor<1x1x32x64xi16>
-    %v37 = tosa.cast %v36 : (tensor<1x1x32x64xi16>) -> tensor<1x1x32x64xi32>
-    %a38 = tosa.reduce_sum %v37 {axis = 2 : i32} : (tensor<1x1x32x64xi32>) -> tensor<1x1x1x64xi32>
-    %c39 = "tosa.const"() {values = dense<67108864> : tensor<1xi32>} : () -> tensor<1xi32>
-    %c40 = "tosa.const"() {values = dense<31> : tensor<1xi8>} : () -> tensor<1xi8>
-    %c41 = "tosa.const"() {values = dense<0> : tensor<1xi32>} : () -> tensor<1xi32>
-    %c42 = "tosa.const"() {values = dense<0> : tensor<1xi16>} : () -> tensor<1xi16>
-    %r43 = tosa.rescale %a38, %c39, %c40, %c41, %c42 { scale32 = true, rounding_mode = #tosa.rounding_mode<SINGLE_ROUND>, per_channel = false, input_unsigned = false, output_unsigned = false } : (tensor<1x1x1x64xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi16>) -> tensor<1x1x1x64xi16>
-    %s44 = tosa.const_shape {values = dense<[1, 1, 64]> : tensor<3xindex>} : () -> !tosa.shape<3>
-    %v45 = tosa.reshape %r43, %s44 : (tensor<1x1x1x64xi16>, !tosa.shape<3>) -> tensor<1x1x64xi16>
+    %s37 = tosa.const_shape {values = dense<[1, 32, 64]> : tensor<3xindex>} : () -> !tosa.shape<3>
+    %v38 = tosa.reshape %v36, %s37 : (tensor<1x1x32x64xi16>, !tosa.shape<3>) -> tensor<1x32x64xi16>
+    %v39 = tosa.cast %v38 : (tensor<1x32x64xi16>) -> tensor<1x32x64xi32>
+    %a40 = tosa.reduce_sum %v39 {axis = 1 : i32} : (tensor<1x32x64xi32>) -> tensor<1x1x64xi32>
+    %c41 = "tosa.const"() {values = dense<67108864> : tensor<1xi32>} : () -> tensor<1xi32>
+    %c42 = "tosa.const"() {values = dense<31> : tensor<1xi8>} : () -> tensor<1xi8>
+    %c43 = "tosa.const"() {values = dense<0> : tensor<1xi32>} : () -> tensor<1xi32>
+    %c44 = "tosa.const"() {values = dense<0> : tensor<1xi16>} : () -> tensor<1xi16>
+    %r45 = tosa.rescale %a40, %c41, %c42, %c43, %c44 { scale32 = true, rounding_mode = #tosa.rounding_mode<SINGLE_ROUND>, per_channel = false, input_unsigned = false, output_unsigned = false } : (tensor<1x1x64xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi16>) -> tensor<1x1x64xi16>
     %c48 = "tosa.const"() {values = dense<0> : tensor<1xi16>} : () -> tensor<1xi16>
     %c49 = "tosa.const"() {values = dense<0> : tensor<1xi16>} : () -> tensor<1xi16>
-    %a50 = tosa.matmul %v45, %w46, %c48, %c49 : (tensor<1x1x64xi16>, tensor<1x64x32xi16>, tensor<1xi16>, tensor<1xi16>) -> tensor<1x1x32xi32>
+    %a50 = tosa.matmul %r45, %w46, %c48, %c49 : (tensor<1x1x64xi16>, tensor<1x64x32xi16>, tensor<1xi16>, tensor<1xi16>) -> tensor<1x1x32xi32>
     %s51 = tosa.const_shape {values = dense<[1, 1, 32]> : tensor<3xindex>} : () -> !tosa.shape<3>
     %v52 = tosa.reshape %b47, %s51 : (tensor<32xi32>, !tosa.shape<3>) -> tensor<1x1x32xi32>
     %a53 = tosa.add %a50, %v52 : (tensor<1x1x32xi32>, tensor<1x1x32xi32>) -> tensor<1x1x32xi32>
