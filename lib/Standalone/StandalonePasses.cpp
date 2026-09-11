@@ -169,12 +169,23 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
       return failure();
     args.push_back(p);
   }
-  for (Value v : outputs) {
-    Value p = toPointer(v);
-    if (!p)
-      return failure();
-    args.push_back(p);
-  }
+  // The driver overwrites its result buffer, but linalg matmul accumulates into
+  // its output. Anything already there, a bias for instance, would be lost. So
+  // the driver writes into scratch and we add that onto the real output.
+  // Write the accumulation into whatever the output collapses from, so the
+  // collapse has no remaining user and folds away.
+  Value cOut = unwrap(outputs[0]);
+  auto cType = dyn_cast<MemRefType>(cOut.getType());
+  if (!cType || !cType.hasStaticShape())
+    return failure();
+
+  Value scratch = rewriter.create<memref::AllocOp>(
+      op->getLoc(), MemRefType::get(cType.getShape(), cType.getElementType()));
+
+  Value scratchPtr = toPointer(scratch);
+  if (!scratchPtr)
+    return failure();
+  args.push_back(scratchPtr);
 
   rewriter.create<emitc::CallOpaqueOp>(
       op->getLoc(),
@@ -187,6 +198,17 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
   Value timeout = rewriter.create<emitc::ConstantOp>(op->getLoc(), i32Type, timeoutAttr);
   SmallVector<Value> waitArgs{timeout};
   rewriter.create<emitc::CallOpaqueOp>(op->getLoc(), TypeRange{},rewriter.getStringAttr("systolic_wait_done"),waitArgs);
+
+  // out += scratch
+  SmallVector<AffineMap> accMaps(2, rewriter.getMultiDimIdentityMap(cType.getRank()));
+  SmallVector<utils::IteratorType> accIters(cType.getRank(),
+                                            utils::IteratorType::parallel);
+  rewriter.create<linalg::GenericOp>(
+      op->getLoc(), ValueRange{scratch}, ValueRange{cOut}, accMaps, accIters,
+      [](OpBuilder &b, Location loc, ValueRange elems) {
+        Value sum = b.create<arith::AddIOp>(loc, elems[0], elems[1]);
+        b.create<linalg::YieldOp>(loc, sum);
+      });
 
   rewriter.eraseOp(op);
   return success();
