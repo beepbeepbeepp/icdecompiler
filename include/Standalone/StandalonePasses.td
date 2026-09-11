@@ -120,4 +120,14 @@ def AllocToGlobal : Pass<"icdec-alloc-to-global", "::mlir::ModuleOp"> {
   let dependentDialects = ["mlir::memref::MemRefDialect"];
 }
 
+def ConvToIm2Col : Pass<"icdec-conv-to-im2col", "::mlir::func::FuncOp"> {
+  let summary = "Rewrite convolutions as im2col plus matmul";
+  let description = [{
+    A convolution is a matrix multiply once the input windows are laid out as
+    rows. Rewriting it that way lets the matmul offload pass send the bulk of
+    the work to the accelerator instead of leaving it on the CPU.
+  }];
+  let dependentDialects = ["mlir::linalg::LinalgDialect", "mlir::tensor::TensorDialect"];
+}
+
 #endif // STANDALONE_PASS

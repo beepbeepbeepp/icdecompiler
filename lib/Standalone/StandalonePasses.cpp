@@ -22,6 +22,7 @@
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Transforms/Passes.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Conversion/TosaToLinalg/TosaToLinalg.h"
 
 #include "Standalone/StandalonePasses.h"
@@ -37,6 +38,7 @@ namespace mlir::standalone {
 #define GEN_PASS_DEF_EXPANDINTMINMAX
 #define GEN_PASS_DEF_GLOBALTOEMITC
 #define GEN_PASS_DEF_ALLOCTOGLOBAL
+#define GEN_PASS_DEF_CONVTOIM2COL
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -125,6 +127,10 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
 // convert each buffer to a flat C pointer: &arr[0]...[0]
   auto toPointer = [&](Value v) -> Value {
     Value base = unwrap(v);
+    // a reinterpret_cast only relabels the shape; the underlying pointer is
+    // the same, so take the source and skip the cast entirely
+    while (auto rc = base.getDefiningOp<memref::ReinterpretCastOp>())
+      base = rc.getSource();
 
     // already a pointer (e.g from memref.alloc): use it directly
     if (isa<emitc::PointerType>(base.getType()))
@@ -215,20 +221,75 @@ public:
     if (!hasReduction)
       return failure();
 
-    // body check: must be exactly mulf -> addf -> yield
-    Block &body = op.getRegion().front();
-    auto ops = body.without_terminator();
-    if (std::distance(ops.begin(), ops.end()) != 2)
+    // work out which loop dimension is the reduction, then read the operand
+    // maps to see how M, K and N are laid out
+    auto maps = op.getIndexingMapsArray();
+    if (maps.size() != 3)
       return failure();
 
-    auto it = ops.begin();
-    auto *mulOp = &*it++;
-    auto *addOp = &*it;
-    if (!isa<arith::MulFOp>(mulOp) || !isa<arith::AddFOp>(addOp))
+    unsigned redDim = 0;
+    bool foundRed = false;
+    for (unsigned i = 0; i < iterTypes.size(); i++)
+      if (iterTypes[i] == utils::IteratorType::reduction) {
+        if (foundRed)
+          return failure();             // more than one reduction
+        redDim = i;
+        foundRed = true;
+      }
+    if (!foundRed)
+      return failure();
+
+    // the output map tells us which dimension is N: its last result
+    AffineMap cMap = maps[2];
+    if (cMap.getNumResults() < 1)
+      return failure();
+    auto nExpr = dyn_cast<AffineDimExpr>(cMap.getResult(cMap.getNumResults() - 1));
+    if (!nExpr)
+      return failure();
+    unsigned nDim = nExpr.getPosition();
+
+    // B must be indexed by exactly N and K; their order tells us whether it is
+    // stored [K, N] as the driver expects, or [N, K] transposed
+    AffineMap bMap = maps[1];
+    if (bMap.getNumResults() != 2)
+      return failure();
+    auto b0 = dyn_cast<AffineDimExpr>(bMap.getResult(0));
+    auto b1 = dyn_cast<AffineDimExpr>(bMap.getResult(1));
+    if (!b0 || !b1)
+      return failure();
+
+    if (b0.getPosition() == nDim && b1.getPosition() == redDim)
+      return failure();                 // transposed B, not handled yet
+    if (!(b0.getPosition() == redDim && b1.getPosition() == nDim))
+      return failure();                 // some other layout entirely
+
+    // body check: a multiply feeding an add, ignoring any widening casts that
+    // integer types need before the multiply
+    Block &body = op.getRegion().front();
+    Operation *mulOp = nullptr, *addOp = nullptr;
+    for (Operation &o : body.without_terminator()) {
+      if (isa<arith::ExtSIOp, arith::ExtUIOp, arith::ExtFOp>(o))
+        continue;                       // widening, not the computation
+      if (isa<arith::MulFOp, arith::MulIOp>(o)) {
+        if (mulOp)
+          return failure();             // more than one multiply
+        mulOp = &o;
+        continue;
+      }
+      if (isa<arith::AddFOp, arith::AddIOp>(o)) {
+        if (addOp)
+          return failure();
+        addOp = &o;
+        continue;
+      }
+      return failure();                 // anything else is not a plain matmul
+    }
+    if (!mulOp || !addOp)
       return failure();
 
     // the add must consume the mul result
-    if (addOp->getOperand(0) != mulOp->getResult(0))
+    if (addOp->getOperand(0) != mulOp->getResult(0) &&
+        addOp->getOperand(1) != mulOp->getResult(0))
       return failure();
 
     return rewriteToSystolicCall(op, op.getInputs(), op.getOutputs(), rewriter);
@@ -512,11 +573,43 @@ public:
   }
 };
 
+// A convolution is a matrix multiply once the input windows are laid out as
+// rows. Rewriting it that way lets the matmul offload pass send the bulk of
+// the work to the accelerator.
+class ConvToIm2Col : public impl::ConvToIm2ColBase<ConvToIm2Col> {
+public:
+  using impl::ConvToIm2ColBase<ConvToIm2Col>::ConvToIm2ColBase;
+
+  void runOnOperation() final {
+    func::FuncOp fn = getOperation();
+    IRRewriter rewriter(fn.getContext());
+
+    SmallVector<linalg::Conv2DNhwcHwcfOp> convs;
+    fn.walk([&](linalg::Conv2DNhwcHwcfOp op) { convs.push_back(op); });
+
+    for (linalg::Conv2DNhwcHwcfOp op : convs) {
+      rewriter.setInsertionPoint(op);
+      FailureOr<std::pair<Operation *, Operation *>> result =
+          linalg::rewriteInIm2Col(rewriter, op);
+      if (failed(result))
+        continue;                 // leave it for the CPU path
+      // rewriteInIm2Col already replaced the uses; nothing else to do
+    }
+  }
+};
+
 // Shared pipeline. When `offloadMatmul` is false, everything runs on the CPU.
 static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
-  // TOSA -> linalg, including shape and constant lowering
-  pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalgNamed());
+  {
+  // HWCF kernel layout turns the im2col result into a plain matmul instead
+  // of a row-wise dot product, which is the orientation the driver expects.
+  TosaToLinalgNamedOptions namedOpts;
+  namedOpts.preferConv2DKernelLayoutHWCF = true;
+  pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalgNamed(namedOpts));
+  }
   pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalg());
+  if (offloadMatmul)
+    pm.addNestedPass<func::FuncOp>(createConvToIm2Col());
   pm.addNestedPass<func::FuncOp>(createTosaToTensorPass());
   {
     TosaToArithPassOptions opts;
@@ -535,17 +628,20 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createOutParam());
 
-  // turn subviews from padding into reinterpret_casts, then drop them
-  pm.addNestedPass<func::FuncOp>(memref::createExpandStridedMetadataPass());
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(memref::createElideReinterpretCastPass());
-
   if (offloadMatmul) {
     pm.addPass(createMatmulToSystolic());
     pm.addPass(createCanonicalizerPass());
     pm.addPass(memref::createElideReinterpretCastPass());
     pm.addNestedPass<func::FuncOp>(createElideCopyAlloc());
+    pm.addNestedPass<func::FuncOp>(memref::createFoldMemRefAliasOpsPass());
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(memref::createElideReinterpretCastPass());
   }
+
+  // turn subviews from padding into reinterpret_casts, then drop them
+  pm.addNestedPass<func::FuncOp>(memref::createExpandStridedMetadataPass());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(memref::createElideReinterpretCastPass());
 
   // lower everything else to loops
   pm.addPass(createConvertLinalgToLoopsPass());
