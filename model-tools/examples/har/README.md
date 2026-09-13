@@ -1,18 +1,19 @@
-# Contoh: model HAR
+# Example: HAR model
 
-Model dan bobotnya tidak disertakan di repo karena merupakan hasil penelitian
-lab. Yang ada di sini hanya TOSA hasil importer, sebagai acuan bentuk keluaran.
+The model and its weights are not in the repository, since they are lab
+research output. What is here is the TOSA produced by the importer, as a
+reference for what the output looks like.
 
-Untuk menjalankan contoh ini, salin dua hal ke folder ini:
+To run this example, copy two things into this directory:
 
-| Berkas | Dipakai untuk |
+| File | Used for |
 |---|---|
-| `model_int8.tflite` | jalur INT8 |
-| `savedmodelhar/` | jalur Q8.8 |
+| `model_int8.tflite` | the INT8 path |
+| `savedmodelhar/` | the Q8.8 path |
 
-Keduanya ada di `TinyML-ARM/har-ppg-imu-edge/experiments/20260708_acconly_deploy`.
+Both live in `TinyML-ARM/har-ppg-imu-edge/experiments/20260708_acconly_deploy`.
 
-Lalu:
+Then:
 
 ```bash
 ./build_model.sh --int8 examples/har/model_int8.tflite har -o out/

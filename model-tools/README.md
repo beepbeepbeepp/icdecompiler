@@ -1,10 +1,10 @@
 # model-tools
 
-Mengubah model CNN terlatih menjadi kode C yang berjalan di RISC-V, dengan atau
-tanpa systolic array. Bekerja bersama ICDeCompiler, yang menangani struktur
-model; tool ini menangani bobot dan kuantisasi.
+Turns a trained CNN into C code that runs on RISC-V, with or without a systolic
+array. Works alongside ICDeCompiler, which handles the model structure; this
+handles weights and quantization.
 
-## Persiapan
+## Setup
 
 ```bash
 python3 -m venv .venv
@@ -12,109 +12,108 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-ICDeCompiler harus sudah dibangun. Kalau letaknya bukan di `../icdecompiler`,
-set `ICDECOMPILER` ke path executable-nya.
+ICDeCompiler must already be built. If it is not at `../icdecompiler`, set
+`ICDECOMPILER` to the path of its executable.
 
-## Cara pakai
+## Usage
 
-Satu perintah, dari model sampai kode C:
+One command, from model to C:
 
 ```bash
-# model INT8, jalan di CPU
+# INT8 model, runs on the CPU
 ./build_model.sh --int8 model_int8.tflite har -o out/
 
-# model float ke Q8.8, matmul ke systolic array
+# float model to Q8.8, matmul goes to the systolic array
 ./build_model.sh --q88 savedmodeldir har -o out/ --array
 ```
 
-Menghasilkan empat berkas di `out/`:
+Produces four files in `out/`:
 
-| Berkas | Isi |
+| File | Contents |
 |---|---|
-| `har.mlir` | struktur model dalam TOSA |
-| `har.c` | kode inferensi |
-| `har_weights.c` `.h` | bobot dan parameter kuantisasi |
+| `har.mlir` | model structure as TOSA |
+| `har.c` | inference code |
+| `har_weights.c` `.h` | weights and quantization parameters |
 
-Nama `har` menentukan awalan simbol di kode C dan nama fungsi inferensinya.
+The name `har` sets the symbol prefix in the C code and the name of the
+inference function.
 
-## Pilih yang mana
+## Which one to use
 
 | | INT8 | Q8.8 |
 |---|---|---|
-| Masukan | `.tflite` terkuantisasi | SavedModel float |
-| Bobot | 1 byte per nilai | 2 byte per nilai |
-| Kuantisasi | scale per kanal, dikalibrasi | skala seragam |
-| Systolic array | perlu konversi | langsung |
+| Input | quantized `.tflite` | float SavedModel |
+| Weights | 1 byte per value | 2 bytes per value |
+| Quantization | per-channel scale, calibrated | uniform scale |
+| Systolic array | needs conversion | direct |
 
-Kalau targetnya CPU saja, INT8 lebih hemat memori. Kalau mau memakai array,
-Q8.8 yang diterima drivernya.
+For a CPU-only target, INT8 uses less memory. For the array, Q8.8 is what the
+driver takes.
 
-Untuk Q8.8, mulai dari model float — bukan dari `.tflite` INT8 — supaya tidak
-ada pembulatan dua kali.
+Start Q8.8 from the float model rather than an INT8 `.tflite`, so the values
+are rounded once instead of twice.
 
-## Yang didukung
+## Supported layers
 
-Layer yang bisa diproses:
-
-- Conv1D dan Conv2D
+- Conv1D and Conv2D
 - MaxPooling
 - Dense
 - GlobalAveragePooling
 - Reshape, Flatten
-- Softmax (dilewati; argmax sudah cukup untuk klasifikasi)
+- Softmax, which is skipped since argmax is enough for classification
 
-Belum didukung: DepthwiseConv, koneksi residual, LSTM, GRU, AveragePooling,
-Transpose.
+Not yet supported: DepthwiseConv, residual connections, LSTM, GRU,
+AveragePooling, Transpose.
 
-Kalau model memakai layer yang belum didukung, importer akan menolak dan
-menyebutkan layer mana. Menambahkannya berarti menulis satu fungsi di
-`tools/tflite_to_tosa.py` atau `tools/keras_to_tosa_q88.py` dan
-mendaftarkannya di `HANDLERS`.
+A model using an unsupported layer is rejected by name. Adding one means
+writing a function in `tools/tflite_to_tosa.py` or `tools/keras_to_tosa_q88.py`
+and registering it in `HANDLERS`.
 
-## Memastikan hasilnya benar
+## Checking the output
 
-Setelah kode C dihasilkan, bandingkan dengan model aslinya.
+Compare the generated C against the model it came from.
 
-Butuh program pembungkus yang membaca masukan dari stdin dan mencetak keluaran.
-`testbench/` menyediakan contohnya untuk model HAR.
+This needs a host wrapper that reads the input from stdin and prints the
+output. `testbench/` has one for the HAR model.
 
 ```bash
-# INT8, dibandingkan dengan interpreter TFLite
+# INT8, against the TFLite interpreter
 gcc -O2 -Iout testbench/test_host.c out/har.c out/har_weights.c -o har_test
 python3 tools/verify_c.py model_int8.tflite ./har_test \
     --input-shape 512 3 --output-tensor 35
 
-# Q8.8, dibandingkan dengan model float
+# Q8.8, against the float model
 gcc -O2 -Iout testbench/test_host_q88.c out/har.c out/har_weights.c -o har_q88_test
 python3 tools/verify_q88.py savedmodeldir ./har_q88_test
 ```
 
-Yang dilaporkan: berapa kali hasilnya sama persis, berapa kali kelas
-prediksinya sama, dan selisih terbesar.
+Reports three things: how often the output matches exactly, how often the
+predicted class matches, and the largest difference.
 
-Kelas prediksi yang selalu sama sudah cukup untuk dipakai. Sama persis sampai
-angka terakhir baru perlu kalau mau dipublikasikan.
+Matching classes every time is enough to use the model. Exact matches down to
+the last digit only matter for publication.
 
-## Struktur
+## Layout
 
+```
 model-tools/
-├── build_model.sh satu perintah untuk seluruh alur
+├── build_model.sh       one command for the whole flow
 ├── requirements.txt
-├── tools/ script yang dipanggil build_model.sh
-├── testbench/ pembungkus untuk verifikasi di PC
-└── examples/har/ model contoh
+├── tools/               scripts build_model.sh calls
+├── testbench/           host wrappers for verification
+└── examples/har/        example model
+```
 
+## Things worth knowing
 
-## Hal yang perlu diketahui
+Dense weights in TFLite and Keras are stored transposed from what MLIR needs.
+The scripts transpose them, so the C code has to follow the layout they
+produce.
 
-Bobot layer dense di TFLite dan Keras tersimpan terbalik dari yang dibutuhkan
-MLIR. Script sudah membalikkannya, jadi kode C harus mengikuti susunan yang
-dihasilkan.
+For Q8.8, BatchNorm is folded into the preceding convolution. Weights and
+activations use `int16_t` with eight fractional bits; biases use `int32_t` in
+Q16.16 so they add straight into the accumulator.
 
-Untuk Q8.8, BatchNorm dilipat ke konvolusi sebelumnya. Bobot dan aktivasi
-memakai `int16_t` dengan delapan bit pecahan; bias memakai `int32_t` Q16.16
-supaya bisa dijumlahkan langsung ke akumulator.
-
-Q8.8 hanya menampung nilai sekitar −128 sampai 128. Script melaporkan kalau ada
-bobot yang tersaturasi. Untuk aktivasi, rentangnya perlu diperiksa sendiri —
-model HAR aman, tapi model dengan nilai lebih besar mungkin tidak.
+Q8.8 only holds values from about −128 to 128. The script reports any weight
+that saturates. Activation ranges are not checked automatically: the HAR model
+stays well inside the range, but a model with larger values might not.
