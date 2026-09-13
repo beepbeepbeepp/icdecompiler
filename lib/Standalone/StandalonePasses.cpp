@@ -365,6 +365,22 @@ public:
         "stdint.h", "stddef.h", "stdbool.h", "stdlib.h"};
 
     OpBuilder builder(mod.getBodyRegion());
+
+    // The array path calls into the driver, so pull its header in as well.
+    // Quoted, not angle-bracketed: it sits next to the generated source.
+    // Inserted before the standard headers so they end up above it.
+    bool usesDriver = false;
+    mod.walk([&](emitc::CallOpaqueOp call) {
+      if (call.getCallee() == "systolic_multiply_large")
+        usesDriver = true;
+    });
+    if (usesDriver && !present.contains("systolic_drv.h")) {
+      builder.setInsertionPointToStart(mod.getBody());
+      builder.create<emitc::IncludeOp>(mod.getLoc(),
+                                       builder.getStringAttr("systolic_drv.h"),
+                                       /*is_standard_include=*/UnitAttr());
+    }
+
     builder.setInsertionPointToStart(mod.getBody());
     for (StringRef hdr : llvm::reverse(ArrayRef<StringRef>(needed))) {
       if (present.contains(hdr))
