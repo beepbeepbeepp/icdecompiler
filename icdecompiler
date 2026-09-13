@@ -4,8 +4,15 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OPT="$HERE/build/bin/standalone-opt"
-TRANSLATE="$HERE/build/bin/standalone-translate"
+# Works both in a built source tree and in a binary package where the tools
+# sit next to this script.
+if [[ -x "$HERE/build/bin/standalone-opt" ]]; then
+  BIN="$HERE/build/bin"
+else
+  BIN="$HERE"
+fi
+OPT="$BIN/standalone-opt"
+TRANSLATE="$BIN/standalone-translate"
 
 if [[ $# -lt 1 ]]; then
   echo "usage: icdecompiler <input.mlir> [-o output.c] [--cpu]" >&2
