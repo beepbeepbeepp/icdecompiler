@@ -1,32 +1,122 @@
-# An out-of-tree MLIR dialect
+# ICDeCompiler
 
-This is an example of an out-of-tree [MLIR](https://mlir.llvm.org/) dialect along with a standalone `opt`-like tool to operate on that dialect.
+Compiles ML models to C for RISC-V targets, offloading matrix multiplication to
+a systolic array accelerator when one is available.
 
-## Building - Component Build
+Input is MLIR in the TOSA or linalg dialect; output is plain C that compiles
+with GCC. There is no LLVM IR step, because the targets here use the PULP GCC
+toolchain rather than clang.
 
-This setup assumes that you have built LLVM and MLIR in `$BUILD_DIR` and installed them to `$PREFIX`. To build and launch the tests, run
+## Building
+
+Needs MLIR built from source. Point CMake at it:
+
 ```sh
 mkdir build && cd build
-cmake -G Ninja .. -DMLIR_DIR=$PREFIX/lib/cmake/mlir -DLLVM_EXTERNAL_LIT=$BUILD_DIR/bin/llvm-lit
-cmake --build . --target check-standalone
+cmake -G Ninja .. \
+  -DMLIR_DIR=$LLVM_BUILD/lib/cmake/mlir \
+  -DLLVM_DIR=$LLVM_BUILD/lib/cmake/llvm \
+  -DCMAKE_BUILD_TYPE=Release
+ninja
 ```
-To build the documentation from the TableGen description of the dialect operations, run
-```sh
-cmake --build . --target mlir-doc
-```
-**Note**: Make sure to pass `-DLLVM_INSTALL_UTILS=ON` when building LLVM with CMake in order to install `FileCheck` to the chosen installation prefix.
 
-## Building - Monolithic Build
+Built against LLVM 24. Earlier versions will not work: TOSA 1.0 renamed several
+attributes, and the emitc conversion behaves differently.
 
-This setup assumes that you build the project as part of a monolithic LLVM build via the `LLVM_EXTERNAL_PROJECTS` mechanism.
-To build LLVM, MLIR, the example and launch the tests run
+On a machine with limited memory, use `ninja -j1`.
+
+If you only want to use the compiler, not modify it, take a binary release
+instead and skip building LLVM entirely.
+
+## Using it
+
 ```sh
-mkdir build && cd build
-cmake -G Ninja `$LLVM_SRC_DIR/llvm` \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DLLVM_TARGETS_TO_BUILD=host \
-    -DLLVM_ENABLE_PROJECTS=mlir \
-    -DLLVM_EXTERNAL_PROJECTS=standalone-dialect -DLLVM_EXTERNAL_STANDALONE_DIALECT_SOURCE_DIR=../
-cmake --build . --target check-standalone
+./icdecompiler model.mlir --cpu -o model.c    # everything on the CPU
+./icdecompiler model.mlir -o model.c          # matmul goes to the array
 ```
-Here, `$LLVM_SRC_DIR` needs to point to the root of the monorepo.
+
+In array mode the generated code calls `systolic_multiply_large` and includes
+`systolic_drv.h`, so that header must sit next to the generated source when it
+is compiled.
+
+Weights are function parameters, not constants, so the MLIR stays small. The
+matching weight arrays come from `model-tools`.
+
+## What it does
+
+The pipeline lowers TOSA to linalg, bufferizes, then splits the work:
+convolutions and matrix multiplies go to the accelerator, everything else
+becomes loops. Convolutions reach the accelerator through im2col, which turns
+them into matrix multiplies first.
+
+Passes written for this project:
+
+| Pass | What it does |
+|---|---|
+| `icdec-compile` | full pipeline, matmul offloaded |
+| `icdec-compile-cpu` | full pipeline, CPU only |
+| `icdec-conv-to-im2col` | rewrites convolutions as matrix multiplies |
+| `icdec-matmul-to-systolic` | matmul becomes a driver call |
+| `icdec-out-param` | memref returns become output parameters |
+| `icdec-elide-copy-alloc` | drops temporaries that are only copied out |
+| `icdec-alloc-to-global` | static allocations become globals, no heap |
+| `icdec-global-to-emitc` | converts memref globals the emitc pass leaves behind |
+| `icdec-expand-int-minmax` | integer min and max become compare plus select |
+| `icdec-add-includes` | prepends the headers the output needs |
+
+The last four exist because the bundled emitc conversion does not handle those
+cases. They are not optimizations; without them the output does not compile.
+
+## Testing
+
+```sh
+./test-numeric/run.sh     # generated code produces correct numbers
+./test-compile/run.sh     # generated code compiles against the driver
+```
+
+`test-numeric` runs each case against a host-side stub that computes the same
+matmul in plain C, and compares element by element. One case compiles both the
+CPU and accelerator paths into the same program and checks they agree, which is
+what catches divergence between the two.
+
+## Adding an operator
+
+Most models fail because an operator is missing rather than because the
+pipeline is wrong. The importer in `model-tools` will say which one.
+
+If TOSA already has the operator, the conversion to linalg usually exists
+upstream and nothing needs to be added here. If it lowers to something the
+matmul pass should catch, check `GenericMatmulToSystolicRewriter` in
+`lib/Standalone/StandalonePasses.cpp`: it reads the indexing maps to work out
+which dimensions are M, K and N, and rejects layouts it does not recognise
+rather than producing wrong code.
+
+## Known limits
+
+No fusion, no tiling, no vectorization. The generated code is correct, not
+fast. Quantization is the one thing that does make a large difference on these
+targets, and that is handled by choosing INT8 or Q8.8 in `model-tools`.
+
+Convolutions reach the accelerator through im2col, which materializes the
+input windows as a matrix. That costs memory: a 512-long input with a 15-tap
+kernel becomes a 256×45 buffer.
+
+The driver limits K to 256, so layers with a larger reduction dimension will
+not fit in one call.
+
+## Layout
+
+```
+include/Standalone/   pass and dialect declarations
+lib/Standalone/       pass implementations
+standalone-opt/       the opt-like tool
+standalone-translate/ MLIR to C
+test-input/           MLIR test cases
+test-numeric/         numeric verification
+test-compile/         compile verification
+icdecompiler          the script you actually run
+make-release.sh       packages the built tools for distribution
+```
+
+The `standalone` naming comes from the MLIR out-of-tree template this started
+from.
