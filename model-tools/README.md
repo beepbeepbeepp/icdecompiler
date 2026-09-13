@@ -1,28 +1,33 @@
 # model-tools
 
-Menyiapkan model TFLite terkuantisasi INT8 untuk dijalankan di target bare-metal:
-mengekstrak bobot dan parameter kuantisasi menjadi kode C, lalu memverifikasi
-implementasi C terhadap interpreter TFLite.
-
-Dipakai di hulu ICDeCompiler. Compiler mengurus struktur model; tool ini
-mengurus bobot dan parameter kuantisasi.
+Mengubah model CNN terlatih menjadi kode C yang berjalan di RISC-V, dengan atau
+tanpa systolic array. Bekerja bersama ICDeCompiler, yang menangani struktur
+model; tool ini menangani bobot dan kuantisasi.
 
 ## Persiapan
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install tflite numpy ai-edge-litert
+pip install -r requirements.txt
 ```
-## Cara cepat
 
-Satu perintah untuk menghasilkan semua berkas:
+ICDeCompiler harus sudah dibangun. Kalau letaknya bukan di `../icdecompiler`,
+set `ICDECOMPILER` ke path executable-nya.
+
+## Cara pakai
+
+Satu perintah, dari model sampai kode C:
 
 ```bash
-./build_model.sh model_int8.tflite har -o output/
+# model INT8, jalan di CPU
+./build_model.sh --int8 model_int8.tflite har -o out/
+
+# model float ke Q8.8, matmul ke systolic array
+./build_model.sh --q88 savedmodeldir har -o out/ --array
 ```
 
-Menghasilkan:
+Menghasilkan empat berkas di `out/`:
 
 | Berkas | Isi |
 |---|---|
@@ -30,58 +35,86 @@ Menghasilkan:
 | `har.c` | kode inferensi |
 | `har_weights.c` `.h` | bobot dan parameter kuantisasi |
 
-Tambahkan `--array` kalau matmul mau diarahkan ke systolic array. Tanpa itu,
-semua dijalankan CPU.
+Nama `har` menentukan awalan simbol di kode C dan nama fungsi inferensinya.
 
-Bagian di bawah menjelaskan tiap langkahnya kalau perlu dijalankan terpisah.
+## Pilih yang mana
 
-## Ekstraksi bobot
+| | INT8 | Q8.8 |
+|---|---|---|
+| Masukan | `.tflite` terkuantisasi | SavedModel float |
+| Bobot | 1 byte per nilai | 2 byte per nilai |
+| Kuantisasi | scale per kanal, dikalibrasi | skala seragam |
+| Systolic array | perlu konversi | langsung |
+
+Kalau targetnya CPU saja, INT8 lebih hemat memori. Kalau mau memakai array,
+Q8.8 yang diterima drivernya.
+
+Untuk Q8.8, mulai dari model float — bukan dari `.tflite` INT8 — supaya tidak
+ada pembulatan dua kali.
+
+## Yang didukung
+
+Layer yang bisa diproses:
+
+- Conv1D dan Conv2D
+- MaxPooling
+- Dense
+- GlobalAveragePooling
+- Reshape, Flatten
+- Softmax (dilewati; argmax sudah cukup untuk klasifikasi)
+
+Belum didukung: DepthwiseConv, koneksi residual, LSTM, GRU, AveragePooling,
+Transpose.
+
+Kalau model memakai layer yang belum didukung, importer akan menolak dan
+menyebutkan layer mana. Menambahkannya berarti menulis satu fungsi di
+`tools/tflite_to_tosa.py` atau `tools/keras_to_tosa_q88.py` dan
+mendaftarkannya di `HANDLERS`.
+
+## Memastikan hasilnya benar
+
+Setelah kode C dihasilkan, bandingkan dengan model aslinya.
+
+Butuh program pembungkus yang membaca masukan dari stdin dan mencetak keluaran.
+`testbench/` menyediakan contohnya untuk model HAR.
 
 ```bash
-python3 extract_weights.py model_int8.tflite -o har_weights_int8 --prefix har
+# INT8, dibandingkan dengan interpreter TFLite
+gcc -O2 -Iout testbench/test_host.c out/har.c out/har_weights.c -o har_test
+python3 tools/verify_c.py model_int8.tflite ./har_test \
+    --input-shape 512 3 --output-tensor 35
+
+# Q8.8, dibandingkan dengan model float
+gcc -O2 -Iout testbench/test_host_q88.c out/har.c out/har_weights.c -o har_q88_test
+python3 tools/verify_q88.py savedmodeldir ./har_q88_test
 ```
 
-Menghasilkan tiga berkas:
+Yang dilaporkan: berapa kali hasilnya sama persis, berapa kali kelas
+prediksinya sama, dan selisih terbesar.
 
-| Berkas | Isi |
-|---|---|
-| `har_weights_int8.c` | bobot int8, bias int32, pengali requantisasi, shift |
-| `har_weights_int8.h` | deklarasi extern dan makro zero point |
-| `har_weights_int8.json` | ringkasan parameter tiap layer |
+Kelas prediksi yang selalu sama sudah cukup untuk dipakai. Sama persis sampai
+angka terakhir baru perlu kalau mau dipublikasikan.
 
-Opsi `--prefix` menentukan awalan nama simbol C. Tanpa itu, nama berkas keluaran
-yang dipakai.
+## Struktur
 
-## Verifikasi implementasi C
+model-tools/
+├── build_model.sh satu perintah untuk seluruh alur
+├── requirements.txt
+├── tools/ script yang dipanggil build_model.sh
+├── testbench/ pembungkus untuk verifikasi di PC
+└── examples/har/ model contoh
 
-Butuh program C yang membaca masukan terkuantisasi dari stdin sebagai bilangan
-bulat dipisah spasi, lalu mencetak logits dengan cara yang sama.
-`test_host.c` menyediakan pembungkus untuk model HAR.
 
-```bash
-gcc -O2 -I. test_host.c ../pulp-nusacore/app-har-int8/har_int8.c \
-    har_weights_int8.c -o har_test
+## Hal yang perlu diketahui
 
-python3 verify_c.py model_int8.tflite ./har_test \
-    --input-shape 512 3 --output-tensor 35 --trials 30
-```
+Bobot layer dense di TFLite dan Keras tersimpan terbalik dari yang dibutuhkan
+MLIR. Script sudah membalikkannya, jadi kode C harus mengikuti susunan yang
+dihasilkan.
 
-Keluarannya melaporkan tiga hal: berapa kasus yang bit-exact, berapa yang
-kelasnya cocok, dan selisih absolut terbesar.
+Untuk Q8.8, BatchNorm dilipat ke konvolusi sebelumnya. Bobot dan aktivasi
+memakai `int16_t` dengan delapan bit pecahan; bias memakai `int32_t` Q16.16
+supaya bisa dijumlahkan langsung ke akumulator.
 
-Opsi `--output-tensor` menunjuk tensor yang dibandingkan. Untuk model dengan
-softmax di akhir, biasanya yang dibandingkan adalah keluaran layer sebelumnya,
-karena implementasi C umumnya berhenti di logits.
-
-## Catatan
-
-Bobot dense pada TFLite tersimpan sebagai `[out, in]`, sedangkan `tosa.matmul`
-mengharapkan `[1, in, out]`. Script sudah melakukan transpose ini; kode C yang
-memakainya harus mengikuti tata letak tersebut.
-
-Pengali requantisasi dihitung dengan port dari `QuantizeMultiplier` milik
-TFLite, menghasilkan pasangan multiplier Q31 dan right shift per kanal keluaran.
-
-Operasi MEAN pada TFLite tidak diekstrak oleh script ini karena tidak punya
-bobot. Parameter kuantisasinya perlu diambil manual dari `.json` yang dihasilkan
-atau langsung dari model.
+Q8.8 hanya menampung nilai sekitar −128 sampai 128. Script melaporkan kalau ada
+bobot yang tersaturasi. Untuk aktivasi, rentangnya perlu diperiksa sendiri —
+model HAR aman, tapi model dengan nilai lebih besar mungkin tidak.
