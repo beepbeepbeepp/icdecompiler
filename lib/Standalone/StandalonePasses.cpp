@@ -37,8 +37,9 @@ namespace mlir::standalone {
 #define GEN_PASS_DEF_ADDINCLUDES
 #define GEN_PASS_DEF_EXPANDINTMINMAX
 #define GEN_PASS_DEF_GLOBALTOEMITC
-#define GEN_PASS_DEF_ALLOCTOGLOBAL
+#define GEN_PASS_DEF_ALLOCTOARENA
 #define GEN_PASS_DEF_CONVTOIM2COL
+#define GEN_PASS_DEF_VIEWTOEMITC
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -511,37 +512,192 @@ public:
   }
 };
 
-// Bare-metal targets have no usable heap, and the bundled emitc conversion
-// cannot express the pointer-to-array cast that memref.alloc produces.
-// Replacing each statically shaped allocation with a module-level global
-// sidesteps both: the buffer lands in .bss and no allocator is needed.
-class AllocToGlobal : public impl::AllocToGlobalBase<AllocToGlobal> {
+// Bare-metal targets have no heap worth using, and the interrupt vector sits at
+// a fixed address, so bss has a hard ceiling. Giving every temporary its own
+// global does not fit.
+//
+// Work out when each buffer is live, pack the ones whose lifetimes do not
+// overlap into the same bytes of one arena, then rewrite every access into an
+// index into that arena. Rewriting the accesses rather than handing out
+// pointers keeps everything in terms emitc can already lower.
+//
+// Buffers used in ways the rewrite cannot follow still become globals, just
+// without sharing, so nothing falls back to malloc.
+class AllocToArena : public impl::AllocToArenaBase<AllocToArena> {
 public:
-  using impl::AllocToGlobalBase<AllocToGlobal>::AllocToGlobalBase;
+  using impl::AllocToArenaBase<AllocToArena>::AllocToArenaBase;
 
   void runOnOperation() final {
-    ModuleOp mod = getOperation();
-    OpBuilder builder(mod.getContext());
+    func::FuncOp fn = getOperation();
+    Block *entry = &fn.getBody().front();
 
-    SmallVector<memref::AllocOp> work;
-    mod.walk([&](memref::AllocOp a) {
-      if (a.getType().hasStaticShape() && a.getDynamicSizes().empty())
-        work.push_back(a);
-    });
+    struct Slot {
+      memref::AllocOp alloc;
+      MemRefType type;
+      int64_t elems;
+      unsigned first;
+      unsigned last;
+      int64_t offset = -1;      // in elements, not bytes
+    };
 
-    unsigned counter = 0;
-    for (memref::AllocOp alloc : work) {
+    DenseMap<Operation *, unsigned> order;
+    unsigned n = 0;
+    for (Operation &op : *entry)
+      order[&op] = n++;
+
+    auto indexOf = [&](Operation *op) -> unsigned {
+      while (op && op->getBlock() != entry)
+        op = op->getParentOp();
+      auto it = order.find(op);
+      return it == order.end() ? 0 : it->second;
+    };
+
+    // One arena per element type: mixing types would need byte addressing,
+    // which puts us back into pointer casts emitc cannot express.
+    DenseMap<Type, SmallVector<Slot>> byType;
+    for (Operation &op : *entry) {
+      auto alloc = dyn_cast<memref::AllocOp>(&op);
+      if (!alloc)
+        continue;
       auto ty = alloc.getType();
+      if (!ty.hasStaticShape() || !alloc.getDynamicSizes().empty())
+        continue;
+      if (!ty.getLayout().isIdentity())
+        continue;
 
-      std::string name = ("__icdec_buf" + Twine(counter++)).str();
+      unsigned first = order[&op];
+      unsigned last = first;
+      bool accessesOnly = true;
+      for (Operation *user : alloc.getResult().getUsers()) {
+        if (!isa<memref::LoadOp, memref::StoreOp, memref::DeallocOp>(user)) {
+          accessesOnly = false;     // something the rewrite cannot follow
+          break;
+        }
+        last = std::max(last, indexOf(user));
+      }
+      if (!accessesOnly)
+        continue;
+
+      byType[ty.getElementType()].push_back(
+          {alloc, ty, ty.getNumElements(), first, last});
+    }
+
+    OpBuilder builder(fn.getContext());
+    auto mod = fn->getParentOfType<ModuleOp>();
+    unsigned arenaIdx = 0;
+
+    for (auto &[elemType, slots] : byType) {
+      // Place the largest first: it constrains the layout most.
+      SmallVector<Slot *> byLargest;
+      for (Slot &s : slots)
+        byLargest.push_back(&s);
+      llvm::stable_sort(byLargest, [](const Slot *a, const Slot *b) {
+        return a->elems > b->elems;
+      });
+
+      int64_t arenaElems = 0;
+      for (Slot *s : byLargest) {
+        int64_t candidate = 0;
+        bool placed = false;
+        while (!placed) {
+          placed = true;
+          for (Slot *other : byLargest) {
+            if (other == s || other->offset < 0)
+              continue;
+            bool inTime = s->first <= other->last && other->first <= s->last;
+            bool inSpace = candidate < other->offset + other->elems &&
+                           other->offset < candidate + s->elems;
+            if (inTime && inSpace) {
+              candidate = other->offset + other->elems;
+              placed = false;
+              break;
+            }
+          }
+        }
+        s->offset = candidate;
+        arenaElems = std::max(arenaElems, candidate + s->elems);
+      }
+
+      auto arenaTy = MemRefType::get({arenaElems}, elemType);
+      std::string name =
+          ("__icdec_arena" + Twine(arenaIdx++) + "_" + fn.getName()).str();
+
       builder.setInsertionPointToStart(mod.getBody());
       builder.create<memref::GlobalOp>(
-          alloc.getLoc(),
-          name,
-          builder.getStringAttr("private"),
-          ty,
-          /*initial_value=*/Attribute(),
-          /*constant=*/false,
+          fn.getLoc(), name, builder.getStringAttr("private"), arenaTy,
+          /*initial_value=*/Attribute(), /*constant=*/false,
+          /*alignment=*/builder.getI64IntegerAttr(8));
+
+      builder.setInsertionPointToStart(entry);
+      Value arena =
+          builder.create<memref::GetGlobalOp>(fn.getLoc(), arenaTy, name);
+
+      for (Slot &s : slots) {
+        // row-major strides for this buffer's shape
+        SmallVector<int64_t> strides(s.type.getRank());
+        int64_t acc = 1;
+        for (int i = s.type.getRank() - 1; i >= 0; --i) {
+          strides[i] = acc;
+          acc *= s.type.getShape()[i];
+        }
+
+        SmallVector<Operation *> users(s.alloc.getResult().getUsers().begin(),
+                                       s.alloc.getResult().getUsers().end());
+        for (Operation *user : users) {
+          if (auto dealloc = dyn_cast<memref::DeallocOp>(user)) {
+            dealloc.erase();
+            continue;
+          }
+
+          builder.setInsertionPoint(user);
+          Location loc = user->getLoc();
+
+          ValueRange indices = isa<memref::LoadOp>(user)
+                                   ? cast<memref::LoadOp>(user).getIndices()
+                                   : cast<memref::StoreOp>(user).getIndices();
+
+          // linear index = offset + sum(index[i] * stride[i])
+          Value linear = builder.create<arith::ConstantIndexOp>(loc, s.offset);
+          for (auto [i, idx] : llvm::enumerate(indices)) {
+            Value st = builder.create<arith::ConstantIndexOp>(loc, strides[i]);
+            Value term = builder.create<arith::MulIOp>(loc, idx, st);
+            linear = builder.create<arith::AddIOp>(loc, linear, term);
+          }
+
+          if (auto load = dyn_cast<memref::LoadOp>(user)) {
+            Value v = builder.create<memref::LoadOp>(loc, arena,
+                                                     ValueRange{linear});
+            load.getResult().replaceAllUsesWith(v);
+            load.erase();
+          } else {
+            auto store = cast<memref::StoreOp>(user);
+            builder.create<memref::StoreOp>(loc, store.getValueToStore(), arena,
+                                            ValueRange{linear});
+            store.erase();
+          }
+        }
+
+        s.alloc.erase();
+      }
+    }
+
+    // Anything the arena could not take still needs to stay off the heap.
+    SmallVector<memref::AllocOp> leftovers;
+    fn.walk([&](memref::AllocOp a) {
+      if (a.getType().hasStaticShape() && a.getDynamicSizes().empty())
+        leftovers.push_back(a);
+    });
+
+    unsigned spare = 0;
+    for (memref::AllocOp alloc : leftovers) {
+      auto ty = alloc.getType();
+      std::string name =
+          ("__icdec_buf" + Twine(spare++) + "_" + fn.getName()).str();
+
+      builder.setInsertionPointToStart(mod.getBody());
+      builder.create<memref::GlobalOp>(
+          alloc.getLoc(), name, builder.getStringAttr("private"), ty,
+          /*initial_value=*/Attribute(), /*constant=*/false,
           /*alignment=*/alloc.getAlignmentAttr());
 
       builder.setInsertionPoint(alloc);
@@ -550,14 +706,74 @@ public:
       alloc.erase();
     }
 
-    // any dealloc of those buffers is now meaningless
-    SmallVector<memref::DeallocOp> deallocs;
-    mod.walk([&](memref::DeallocOp d) {
+    SmallVector<memref::DeallocOp> deadDeallocs;
+    fn.walk([&](memref::DeallocOp d) {
       if (d.getMemref().getDefiningOp<memref::GetGlobalOp>())
-        deallocs.push_back(d);
+        deadDeallocs.push_back(d);
     });
-    for (memref::DeallocOp d : deallocs)
+    for (memref::DeallocOp d : deadDeallocs)
       d.erase();
+  }
+};
+
+// The bundled emitc conversion has no pattern for memref.view, which the arena
+// allocator produces. A view is a typed pointer into the arena.
+//
+// The conversion recognises a memref backed by an emitc.ptr through an
+// unrealized cast, and computes element addresses linearly from it. So taking
+// the address of the byte at the offset and casting that pointer to the buffer
+// type is enough; no array type is involved.
+class ViewToEmitC : public impl::ViewToEmitCBase<ViewToEmitC> {
+public:
+  using impl::ViewToEmitCBase<ViewToEmitC>::ViewToEmitCBase;
+
+  void runOnOperation() final {
+    ModuleOp mod = getOperation();
+    OpBuilder builder(mod.getContext());
+
+    SmallVector<memref::ViewOp> views;
+    mod.walk([&](memref::ViewOp v) { views.push_back(v); });
+
+    for (memref::ViewOp view : views) {
+      auto dstTy = dyn_cast<MemRefType>(view.getType());
+      auto srcTy = dyn_cast<MemRefType>(view.getSource().getType());
+      if (!dstTy || !srcTy || !dstTy.hasStaticShape())
+        continue;
+
+      auto offsetOp = view.getByteShift().getDefiningOp<arith::ConstantIndexOp>();
+      if (!offsetOp)
+        continue;                     // only constant offsets are handled
+
+      builder.setInsertionPoint(view);
+      Location loc = view.getLoc();
+
+      // the arena, as an emitc array
+      auto srcArrTy = emitc::ArrayType::get(srcTy.getShape(),
+                                            srcTy.getElementType());
+      Value arena = builder.create<UnrealizedConversionCastOp>(
+                        loc, srcArrTy, view.getSource()).getResult(0);
+
+      // &arena[offset], a pointer to the arena's element type
+      Value idx = builder.create<emitc::ConstantOp>(
+          loc, builder.getIndexType(), builder.getIndexAttr(offsetOp.value()));
+      Value elem = builder.create<emitc::SubscriptOp>(
+          loc, cast<TypedValue<emitc::ArrayType>>(arena), ValueRange{idx});
+      auto srcPtrTy = emitc::PointerType::get(srcTy.getElementType());
+      Value bytePtr = builder.create<emitc::AddressOfOp>(loc, srcPtrTy, elem);
+
+      // reinterpret those bytes as the buffer's element type
+      auto dstPtrTy = emitc::PointerType::get(dstTy.getElementType());
+      Value typedPtr = bytePtr;
+      if (srcTy.getElementType() != dstTy.getElementType())
+        typedPtr = builder.create<emitc::CastOp>(loc, dstPtrTy, bytePtr);
+
+      // hand it back as a memref; the conversion will index it linearly
+      Value repl = builder.create<UnrealizedConversionCastOp>(
+                       loc, dstTy, typedPtr).getResult(0);
+
+      view.getResult().replaceAllUsesWith(repl);
+      view.erase();
+    }
   }
 };
 
@@ -639,11 +855,11 @@ public:
 // Shared pipeline. When `offloadMatmul` is false, everything runs on the CPU.
 static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   {
-  // HWCF kernel layout turns the im2col result into a plain matmul instead
-  // of a row-wise dot product, which is the orientation the driver expects.
-  TosaToLinalgNamedOptions namedOpts;
-  namedOpts.preferConv2DKernelLayoutHWCF = true;
-  pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalgNamed(namedOpts));
+    // HWCF kernel layout turns the im2col result into a plain matmul instead
+    // of a row-wise dot product, which is the orientation the driver expects.
+    TosaToLinalgNamedOptions namedOpts;
+    namedOpts.preferConv2DKernelLayoutHWCF = true;
+    pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalgNamed(namedOpts));
   }
   pm.addNestedPass<func::FuncOp>(tosa::createTosaToLinalg());
   if (offloadMatmul)
@@ -661,7 +877,8 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addPass(bufferization::createEmptyTensorEliminationPass());
   bufferization::OneShotBufferizePassOptions bufOpts;
   bufOpts.bufferizeFunctionBoundaries = true;
-  bufOpts.functionBoundaryTypeConversion = bufferization::LayoutMapOption::IdentityLayoutMap;
+  bufOpts.functionBoundaryTypeConversion =
+      bufferization::LayoutMapOption::IdentityLayoutMap;
   pm.addPass(bufferization::createOneShotBufferizePass(bufOpts));
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createOutParam());
@@ -693,8 +910,12 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addPass(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(createElideCopyAlloc());
 
+  // Buffers become arena slices only once the loops exist, so every access is
+  // a plain load or store the rewrite can follow.
+  pm.addNestedPass<func::FuncOp>(createAllocToArena());
+  pm.addPass(createCanonicalizerPass());
+
   // convert to emitc and clean up
-  pm.addPass(createAllocToGlobal());
   pm.addPass(createGlobalToEmitC());
   pm.addPass(createConvertToEmitC());
   pm.addPass(createExpandIntMinMax());

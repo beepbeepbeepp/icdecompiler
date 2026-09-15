@@ -106,16 +106,16 @@ def GlobalToEmitC : Pass<"icdec-global-to-emitc", "::mlir::ModuleOp"> {
   let dependentDialects = ["mlir::emitc::EmitCDialect", "mlir::memref::MemRefDialect"];
 }
 
-def AllocToGlobal : Pass<"icdec-alloc-to-global", "::mlir::ModuleOp"> {
-  let summary = "Turn static memref allocations into static globals";
+def AllocToArena : Pass<"icdec-alloc-to-arena", "::mlir::func::FuncOp"> {
+  let summary = "Place static allocations in one shared arena";
   let description = [{
-    Bare-metal targets have no heap worth using, and the bundled emitc
-    conversion cannot express the pointer-to-array cast that memref.alloc
-    produces. Replacing each statically shaped allocation with a module-level
-    global sidesteps both problems: the buffer lands in .bss and the generated
-    C needs no allocator.
+    Bare-metal targets have no heap worth using, and giving every temporary its
+    own global wastes memory: most of them are dead by the time the next layer
+    runs. This pass works out when each buffer is live, then packs the ones
+    whose lifetimes do not overlap into the same bytes of a single arena.
 
-    Only allocations whose shape is fully static are converted.
+    Only allocations with a fully static shape are placed. Anything else is
+    left alone.
   }];
   let dependentDialects = ["mlir::memref::MemRefDialect"];
 }
@@ -128,6 +128,16 @@ def ConvToIm2Col : Pass<"icdec-conv-to-im2col", "::mlir::func::FuncOp"> {
     the work to the accelerator instead of leaving it on the CPU.
   }];
   let dependentDialects = ["mlir::linalg::LinalgDialect", "mlir::tensor::TensorDialect"];
+}
+
+def ViewToEmitC : Pass<"icdec-view-to-emitc", "::mlir::ModuleOp"> {
+  let summary = "Lower memref.view into emitc pointer arithmetic";
+  let description = [{
+    The bundled emitc conversion has no pattern for memref.view, which the
+    arena allocator produces. A view is just a typed pointer into the arena, so
+    it becomes an address-of plus a cast.
+  }];
+  let dependentDialects = ["mlir::emitc::EmitCDialect"];
 }
 
 #endif // STANDALONE_PASS
