@@ -42,6 +42,25 @@ is compiled.
 Weights are function parameters, not constants, so the MLIR stays small. The
 matching weight arrays come from `model-tools`.
 
+Every compilation prints a summary to stderr:
+
+```
+ICDeCompiler summary
+  input             : 1x1x512x3 i16
+  output            : 1x1x4 i16
+  MACs total        : 805275
+  on accelerator    : 612480  (76%) in 5 calls
+  on CPU            : 192795  (23%)
+  scratch memory    : 36864 bytes
+```
+
+Only multiply-accumulates are counted. Pooling, clamping and requantisation run
+on the CPU too, but they are element-wise and cheap next to the matrix work, so
+counting them the same way would misrepresent where the time goes.
+
+Scratch memory is the working buffers, which the arena allocator packs by
+lifetime. Weights are not included, since they arrive as parameters.
+
 ## What it does
 
 The pipeline lowers TOSA to linalg, bufferizes, then splits the work:
@@ -59,13 +78,20 @@ Passes written for this project:
 | `icdec-matmul-to-systolic` | matmul becomes a driver call |
 | `icdec-out-param` | memref returns become output parameters |
 | `icdec-elide-copy-alloc` | drops temporaries that are only copied out |
-| `icdec-alloc-to-global` | static allocations become globals, no heap |
+| `icdec-alloc-to-arena` | packs buffers by lifetime into shared arenas |
 | `icdec-global-to-emitc` | converts memref globals the emitc pass leaves behind |
 | `icdec-expand-int-minmax` | integer min and max become compare plus select |
 | `icdec-add-includes` | prepends the headers the output needs |
+| `icdec-print-summary` | reports the MAC split and memory use |
 
-The last four exist because the bundled emitc conversion does not handle those
-cases. They are not optimizations; without them the output does not compile.
+Several of these exist because the bundled emitc conversion does not handle
+those cases. They are not optimizations; without them the output does not
+compile.
+
+`icdec-alloc-to-arena` is the exception: it computes when each buffer is live
+and lets buffers whose lifetimes do not overlap share memory. On the HAR model
+this brings working memory down from about 70 KB to 24 KB, which is the
+difference between fitting on the board and not.
 
 ## Testing
 
@@ -103,6 +129,10 @@ kernel becomes a 256×45 buffer.
 
 The driver limits K to 256, so layers with a larger reduction dimension will
 not fit in one call.
+
+Buffers are shared only when their element types match. A single byte arena
+carved up by offset would pack tighter, but emitc has no way to express a
+pointer into the middle of one.
 
 ## Layout
 
