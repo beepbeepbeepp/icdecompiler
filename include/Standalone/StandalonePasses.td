@@ -140,4 +140,13 @@ def ViewToEmitC : Pass<"icdec-view-to-emitc", "::mlir::ModuleOp"> {
   let dependentDialects = ["mlir::emitc::EmitCDialect"];
 }
 
+def PrintSummary : Pass<"icdec-print-summary", "::mlir::ModuleOp"> {
+  let summary = "Report what the compiler did with the model";
+  let description = [{
+    Prints operator counts, how much went to the accelerator, and how much
+    memory the generated code needs. Written to stderr so it does not end up
+    in the generated source.
+  }];
+}
+
 #endif // STANDALONE_PASS

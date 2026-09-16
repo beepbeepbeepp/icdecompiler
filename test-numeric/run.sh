@@ -14,7 +14,7 @@ run_case() {
   local name="$3"
   local mode="${4:-}"
 
-  "$ROOT/icdecompiler" "$mlir" $mode -o "$TMP/body.c" > /dev/null
+  "$ROOT/icdecompiler" "$mlir" $mode -o "$TMP/body.c" > /dev/null 2>&1
 
   {
     echo '#include <stdint.h>'
@@ -36,8 +36,8 @@ run_case "$ROOT/test-input/rescale.mlir"          main_rescale.c rescale --cpu
 
 # The accelerator path must produce the same numbers as the CPU path, so both
 # are compiled into one program and compared element by element.
-"$ROOT/icdecompiler" "$ROOT/test-input/conv_accel.mlir" --cpu -o "$TMP/conv_cpu.c" > /dev/null
-"$ROOT/icdecompiler" "$ROOT/test-input/conv_accel.mlir"        -o "$TMP/conv_acc.c" > /dev/null
+"$ROOT/icdecompiler" "$ROOT/test-input/conv_accel.mlir" --cpu -o "$TMP/conv_cpu.c" > /dev/null 2>&1
+"$ROOT/icdecompiler" "$ROOT/test-input/conv_accel.mlir"        -o "$TMP/conv_acc.c" > /dev/null 2>&1
 
 sed 's/conv_accel/conv_cpu/' "$TMP/conv_cpu.c" > "$TMP/cc1.c"
 {

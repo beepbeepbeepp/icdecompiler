@@ -10,7 +10,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 INPUT="${1:-$ROOT/test-input/int_matmul.mlir}"
 
-"$ROOT/icdecompiler" "$INPUT" -o "$TMP/body.c" > /dev/null
+"$ROOT/icdecompiler" "$INPUT" -o "$TMP/body.c" > /dev/null 2>&1
 
 {
   echo '#include <stdint.h>'

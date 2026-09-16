@@ -40,6 +40,7 @@ namespace mlir::standalone {
 #define GEN_PASS_DEF_ALLOCTOARENA
 #define GEN_PASS_DEF_CONVTOIM2COL
 #define GEN_PASS_DEF_VIEWTOEMITC
+#define GEN_PASS_DEF_PRINTSUMMARY
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -340,13 +341,23 @@ public:
   using impl::MatmulToSystolicBase<MatmulToSystolic>::MatmulToSystolicBase;
 
   void runOnOperation() final {
+    Operation *root = getOperation();
+
     RewritePatternSet patterns(&getContext());
     patterns.add<MatmulToSystolicRewriter>(&getContext());
     patterns.add<GenericMatmulToSystolicRewriter>(&getContext());
     patterns.add<BatchMatmulToSystolicRewriter>(&getContext());
     FrozenRewritePatternSet patternSet(std::move(patterns));
-    if (failed(applyPatternsGreedily(getOperation(), patternSet)))
+    if (failed(applyPatternsGreedily(root, patternSet)))
       signalPassFailure();
+
+    // Record how much went to the accelerator, for the summary at the end.
+    int64_t offloaded = 0;
+    root->walk([&](emitc::CallOpaqueOp call) {
+      if (call.getCallee() == "systolic_multiply_large")
+        offloaded++;
+    });
+    root->setAttr("icdec.offloaded_ops", OpBuilder(&getContext()).getI64IntegerAttr(offloaded));
   }
 };
 
@@ -585,6 +596,7 @@ public:
     OpBuilder builder(fn.getContext());
     auto mod = fn->getParentOfType<ModuleOp>();
     unsigned arenaIdx = 0;
+    int64_t totalArenaBytes = 0;
 
     for (auto &[elemType, slots] : byType) {
       // Place the largest first: it constrains the layout most.
@@ -621,6 +633,9 @@ public:
       auto arenaTy = MemRefType::get({arenaElems}, elemType);
       std::string name =
           ("__icdec_arena" + Twine(arenaIdx++) + "_" + fn.getName()).str();
+
+      unsigned width = elemType.getIntOrFloatBitWidth();
+      totalArenaBytes += arenaElems * (width / 8);
 
       builder.setInsertionPointToStart(mod.getBody());
       builder.create<memref::GlobalOp>(
@@ -680,6 +695,8 @@ public:
         s.alloc.erase();
       }
     }
+
+    fn->setAttr("icdec.arena_bytes", builder.getI64IntegerAttr(totalArenaBytes));
 
     // Anything the arena could not take still needs to stay off the heap.
     SmallVector<memref::AllocOp> leftovers;
@@ -852,6 +869,55 @@ public:
   }
 };
 
+// Report what the compiler did, in the spirit of what Vela prints: how much
+// went to the accelerator, and how much memory the result needs.
+class PrintSummary : public impl::PrintSummaryBase<PrintSummary> {
+public:
+  using impl::PrintSummaryBase<PrintSummary>::PrintSummaryBase;
+
+  void runOnOperation() final {
+    ModuleOp mod = getOperation();
+
+    int64_t offloaded = 0;
+    if (auto attr = mod->getAttrOfType<IntegerAttr>("icdec.offloaded_ops"))
+      offloaded = attr.getInt();
+
+    int64_t arenaBytes = 0;
+    int64_t weightBytes = 0;
+    int64_t loops = 0;
+
+    mod.walk([&](Operation *op) {
+      if (auto attr = op->getAttrOfType<IntegerAttr>("icdec.arena_bytes"))
+        arenaBytes += attr.getInt();
+      if (isa<emitc::ForOp>(op))
+        loops++;
+    });
+
+    // Constant globals are weights; the rest are buffers we already counted.
+    mod.walk([&](emitc::GlobalOp g) {
+      if (!g.getConstSpecifier())
+        return;
+      auto arrTy = dyn_cast<emitc::ArrayType>(g.getType());
+      if (!arrTy)
+        return;
+      unsigned width = arrTy.getElementType().getIntOrFloatBitWidth();
+      int64_t elems = 1;
+      for (int64_t d : arrTy.getShape())
+        elems *= d;
+      weightBytes += elems * (width / 8);
+    });
+
+    llvm::errs() << "\n";
+    llvm::errs() << "ICDeCompiler summary\n";
+    llvm::errs() << "  accelerator calls : " << offloaded << "\n";
+    llvm::errs() << "  loop nests on CPU : " << loops << "\n";
+    llvm::errs() << "  scratch memory    : " << arenaBytes << " bytes\n";
+    if (weightBytes)
+      llvm::errs() << "  constants         : " << weightBytes << " bytes\n";
+    llvm::errs() << "\n";
+  }
+};
+
 // Shared pipeline. When `offloadMatmul` is false, everything runs on the CPU.
 static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   {
@@ -923,6 +989,7 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addPass(createReconcileUnrealizedCastsPass());
   pm.addPass(createSymbolDCEPass());
   pm.addPass(createAddIncludes());
+  pm.addPass(createPrintSummary());
 }
 
 class IcdecCompile : public impl::IcdecCompileBase<IcdecCompile> {
