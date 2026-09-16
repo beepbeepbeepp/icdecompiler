@@ -869,8 +869,13 @@ public:
   }
 };
 
-// Report what the compiler did, in the spirit of what Vela prints: how much
-// went to the accelerator, and how much memory the result needs.
+// Report what the compiler did, in the spirit of what Vela prints: how much of
+// the multiply-accumulate work went to the accelerator, and how much memory
+// the result needs.
+//
+// Only MACs are counted. Pooling, clamping and requantisation run on the CPU
+// too, but they are element-wise and cheap next to the matrix work, so folding
+// them into the same number would misrepresent where the time goes.
 class PrintSummary : public impl::PrintSummaryBase<PrintSummary> {
 public:
   using impl::PrintSummaryBase<PrintSummary>::PrintSummaryBase;
@@ -878,39 +883,87 @@ public:
   void runOnOperation() final {
     ModuleOp mod = getOperation();
 
-    int64_t offloaded = 0;
-    if (auto attr = mod->getAttrOfType<IntegerAttr>("icdec.offloaded_ops"))
-      offloaded = attr.getInt();
+    int64_t accelCalls = 0, accelMacs = 0;
+    int64_t cpuMacs = 0;
+    int64_t arenaBytes = 0, weightBytes = 0;
 
-    int64_t arenaBytes = 0;
-    int64_t weightBytes = 0;
-    int64_t loops = 0;
+    // Accelerator calls carry M, K and N as constants, so the MAC count is
+    // just their product.
+    mod.walk([&](emitc::CallOpaqueOp call) {
+      if (call.getCallee() != "systolic_multiply_large")
+        return;
+      accelCalls++;
+
+      int64_t dims[3];
+      for (unsigned i = 0; i < 3 && i < call.getNumOperands(); i++) {
+        auto c = call.getOperand(i).getDefiningOp<emitc::ConstantOp>();
+        if (!c)
+          return;
+        auto attr = dyn_cast<IntegerAttr>(c.getValue());
+        if (!attr)
+          return;
+        dims[i] = attr.getInt();
+      }
+      accelMacs += dims[0] * dims[1] * dims[2];
+    });
+
+    // A multiply inside a loop nest runs once per iteration of every loop
+    // around it. Loops with non-constant bounds are skipped rather than
+    // guessed at.
+    mod.walk([&](Operation *op) {
+      if (!isa<emitc::MulOp>(op))
+        return;
+
+      int64_t trips = 1;
+      for (Operation *p = op->getParentOp(); p; p = p->getParentOp()) {
+        auto loop = dyn_cast<emitc::ForOp>(p);
+        if (!loop)
+          continue;
+        auto lo = loop.getLowerBound().getDefiningOp<emitc::ConstantOp>();
+        auto hi = loop.getUpperBound().getDefiningOp<emitc::ConstantOp>();
+        auto st = loop.getStep().getDefiningOp<emitc::ConstantOp>();
+        if (!lo || !hi || !st)
+          return;                       // bound we cannot evaluate
+        auto loA = dyn_cast<IntegerAttr>(lo.getValue());
+        auto hiA = dyn_cast<IntegerAttr>(hi.getValue());
+        auto stA = dyn_cast<IntegerAttr>(st.getValue());
+        if (!loA || !hiA || !stA || stA.getInt() == 0)
+          return;
+        int64_t count = (hiA.getInt() - loA.getInt() + stA.getInt() - 1) /
+                        stA.getInt();
+        trips *= (count > 0 ? count : 0);
+      }
+      cpuMacs += trips;
+    });
 
     mod.walk([&](Operation *op) {
       if (auto attr = op->getAttrOfType<IntegerAttr>("icdec.arena_bytes"))
         arenaBytes += attr.getInt();
-      if (isa<emitc::ForOp>(op))
-        loops++;
     });
 
-    // Constant globals are weights; the rest are buffers we already counted.
     mod.walk([&](emitc::GlobalOp g) {
       if (!g.getConstSpecifier())
         return;
       auto arrTy = dyn_cast<emitc::ArrayType>(g.getType());
       if (!arrTy)
         return;
-      unsigned width = arrTy.getElementType().getIntOrFloatBitWidth();
       int64_t elems = 1;
       for (int64_t d : arrTy.getShape())
         elems *= d;
-      weightBytes += elems * (width / 8);
+      weightBytes += elems * (arrTy.getElementType().getIntOrFloatBitWidth() / 8);
     });
 
-    llvm::errs() << "\n";
-    llvm::errs() << "ICDeCompiler summary\n";
-    llvm::errs() << "  accelerator calls : " << offloaded << "\n";
-    llvm::errs() << "  loop nests on CPU : " << loops << "\n";
+    int64_t totalMacs = accelMacs + cpuMacs;
+
+    llvm::errs() << "\nICDeCompiler summary\n";
+    llvm::errs() << "  MACs total        : " << totalMacs << "\n";
+    if (totalMacs > 0) {
+      llvm::errs() << "  on accelerator    : " << accelMacs
+                   << "  (" << (accelMacs * 100 / totalMacs) << "%)"
+                   << " in " << accelCalls << " calls\n";
+      llvm::errs() << "  on CPU            : " << cpuMacs
+                   << "  (" << (cpuMacs * 100 / totalMacs) << "%)\n";
+    }
     llvm::errs() << "  scratch memory    : " << arenaBytes << " bytes\n";
     if (weightBytes)
       llvm::errs() << "  constants         : " << weightBytes << " bytes\n";
