@@ -955,7 +955,37 @@ public:
 
     int64_t totalMacs = accelMacs + cpuMacs;
 
+    // Only the first and last parameters are interesting: the input tensor and
+    // the output buffer. Everything between them is weights.
+    std::string inShape, outShape;
+    mod.walk([&](emitc::FuncOp fn) {
+      if (!inShape.empty())
+        return;
+      auto inputs = fn.getFunctionType().getInputs();
+      if (inputs.empty())
+        return;
+
+      auto describe = [](Type t) {
+        std::string s;
+        llvm::raw_string_ostream os(s);
+        if (auto arr = dyn_cast<emitc::ArrayType>(t)) {
+          llvm::interleave(arr.getShape(), os, "x");
+          os << " " << arr.getElementType();
+        } else {
+          os << t;
+        }
+        return s;
+      };
+
+      inShape = describe(inputs.front());
+      outShape = describe(inputs.back());
+    });
+
     llvm::errs() << "\nICDeCompiler summary\n";
+    if (!inShape.empty()) {
+      llvm::errs() << "  input             : " << inShape << "\n";
+      llvm::errs() << "  output            : " << outShape << "\n";
+    }
     llvm::errs() << "  MACs total        : " << totalMacs << "\n";
     if (totalMacs > 0) {
       llvm::errs() << "  on accelerator    : " << accelMacs
@@ -966,7 +996,7 @@ public:
     }
     llvm::errs() << "  scratch memory    : " << arenaBytes << " bytes\n";
     if (weightBytes)
-      llvm::errs() << "  constants         : " << weightBytes << " bytes\n";
+      llvm::errs() << "  constants in code : " << weightBytes << " bytes\n";
     llvm::errs() << "\n";
   }
 };
