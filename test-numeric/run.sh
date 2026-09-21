@@ -23,7 +23,7 @@ run_case() {
     cat "$TMP/body.c"
   } > "$TMP/gen.c"
 
-  gcc "$TMP/gen.c" "$HERE/$driver" -I"$HERE" -o "$TMP/test_$name"
+  gcc "$TMP/gen.c" "$HERE/$driver" -I"$HERE" ${CASE_CFLAGS:-} -o "$TMP/test_$name" -lm
   "$TMP/test_$name"
 }
 
@@ -34,6 +34,8 @@ run_case "$ROOT/test-input/int_matmul.mlir"       main.c       square_cpu --cpu
 run_case "$ROOT/test-input/q88_requant.mlir"      main_q88.c   q88
 run_case "$ROOT/test-input/rescale.mlir"          main_rescale.c rescale --cpu
 run_case "$ROOT/test-ops/reduce_max.mlir"         main_reduce_max.c reduce_max --cpu
+run_case "$ROOT/test-ops/exp.mlir"                main_exp.c   exp --cpu
+CASE_CFLAGS=-DSIGMOID run_case "$ROOT/test-ops/sigmoid.mlir" main_exp.c sigmoid --cpu
 
 # The accelerator path must produce the same numbers as the CPU path, so both
 # are compiled into one program and compared element by element.

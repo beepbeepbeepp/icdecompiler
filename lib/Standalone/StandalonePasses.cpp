@@ -382,11 +382,27 @@ public:
     // The array path calls into the driver, so pull its header in as well.
     // Quoted, not angle-bracketed: it sits next to the generated source.
     // Inserted before the standard headers so they end up above it.
-    bool usesDriver = false;
+    // libm calls come from convert-math-to-emitc; the driver call from the
+    // matmul pass. Each needs its header, and only when actually used.
+    static constexpr StringRef mathFns[] = {
+        "expf", "exp", "logf", "log", "sqrtf", "sqrt", "tanhf", "tanh",
+        "floorf", "floor", "ceilf", "ceil", "roundf", "round", "fabsf", "fabs",
+        "cosf", "cos", "sinf", "sin", "powf", "pow"};
+
+    bool usesDriver = false, usesMath = false;
     mod.walk([&](emitc::CallOpaqueOp call) {
-      if (call.getCallee() == "systolic_multiply_large")
+      StringRef callee = call.getCallee();
+      if (callee == "systolic_multiply_large")
         usesDriver = true;
+      if (llvm::is_contained(mathFns, callee))
+        usesMath = true;
     });
+    if (usesMath && !present.contains("math.h")) {
+      builder.setInsertionPointToStart(mod.getBody());
+      builder.create<emitc::IncludeOp>(mod.getLoc(),
+                                       builder.getStringAttr("math.h"),
+                                       /*is_standard_include=*/builder.getUnitAttr());
+    }
     if (usesDriver && !present.contains("systolic_drv.h")) {
       builder.setInsertionPointToStart(mod.getBody());
       builder.create<emitc::IncludeOp>(mod.getLoc(),
@@ -1209,6 +1225,7 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
 
   // convert to emitc and clean up
   pm.addPass(createGlobalToEmitC());
+  pm.addPass(createConvertMathToEmitC());
   pm.addPass(createConvertToEmitC());
   pm.addPass(createExpandIntMinMax());
   pm.addNestedPass<emitc::FuncOp>(createConvertArithToEmitC());
