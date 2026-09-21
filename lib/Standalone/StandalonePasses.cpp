@@ -41,6 +41,7 @@ namespace mlir::standalone {
 #define GEN_PASS_DEF_CONVTOIM2COL
 #define GEN_PASS_DEF_VIEWTOEMITC
 #define GEN_PASS_DEF_PRINTSUMMARY
+#define GEN_PASS_DEF_REINTERPRETCASTTOINDEX
 #include "Standalone/StandalonePasses.h.inc"
 
 namespace {
@@ -520,6 +521,143 @@ public:
       op->getResult(0).replaceAllUsesWith(sel);
       op->erase();
     }
+  }
+};
+
+// A reinterpret_cast over contiguous memory only relabels the shape, and emitc
+// has no way to write that down. Rewrite every access through the cast so it
+// addresses the source directly: linearise the index with the cast's strides,
+// then split it back into the source's shape.
+//
+// Copies through a cast are expanded into loops first, so they reduce to the
+// same load/store case. Once nothing uses the cast it is erased.
+class ReinterpretCastToIndex
+    : public impl::ReinterpretCastToIndexBase<ReinterpretCastToIndex> {
+public:
+    using impl::ReinterpretCastToIndexBase<ReinterpretCastToIndex>::ReinterpretCastToIndexBase;
+
+  void runOnOperation() final {
+    func::FuncOp fn = getOperation();
+
+    SmallVector<memref::ReinterpretCastOp> casts;
+    fn.walk([&](memref::ReinterpretCastOp c) { casts.push_back(c); });
+
+    for (memref::ReinterpretCastOp rc : casts) {
+      auto srcTy = dyn_cast<MemRefType>(rc.getSource().getType());
+      MemRefType dstTy = rc.getType();
+      if (!srcTy || !srcTy.hasStaticShape() || !srcTy.getLayout().isIdentity())
+        continue;
+      if (!dstTy.hasStaticShape())
+        continue;
+
+      // only fully static offset and strides can be folded into an index
+      ArrayRef<int64_t> offsets = rc.getStaticOffsets();
+      ArrayRef<int64_t> strides = rc.getStaticStrides();
+      if (offsets.size() != 1 || ShapedType::isDynamic(offsets[0]))
+        continue;
+      if (llvm::any_of(strides, ShapedType::isDynamic))
+        continue;
+      int64_t offset = offsets[0];
+
+      // turn copies into explicit loops so only loads and stores remain
+      SmallVector<memref::CopyOp> copies;
+      for (Operation *user : rc->getUsers())
+        if (auto cp = dyn_cast<memref::CopyOp>(user))
+          copies.push_back(cp);
+      for (memref::CopyOp cp : copies)
+        expandCopy(cp);
+
+      bool onlyAccesses = llvm::all_of(rc->getUsers(), [](Operation *u) {
+        return isa<memref::LoadOp, memref::StoreOp>(u);
+      });
+      if (!onlyAccesses)
+        continue;                     // something we cannot follow; leave it
+
+      SmallVector<Operation *> users(rc->getUsers().begin(),
+                                     rc->getUsers().end());
+      for (Operation *user : users) {
+        OpBuilder b(user);
+        Location loc = user->getLoc();
+
+        if (auto load = dyn_cast<memref::LoadOp>(user)) {
+          SmallVector<Value> idx = relabel(b, loc, load.getIndices(), offset,
+                                           strides, srcTy);
+          Value v = b.create<memref::LoadOp>(loc, rc.getSource(), idx);
+          load.getResult().replaceAllUsesWith(v);
+          load.erase();
+        } else {
+          auto store = cast<memref::StoreOp>(user);
+          SmallVector<Value> idx = relabel(b, loc, store.getIndices(), offset,
+                                           strides, srcTy);
+          b.create<memref::StoreOp>(loc, store.getValueToStore(),
+                                    rc.getSource(), idx);
+          store.erase();
+        }
+      }
+
+      if (rc->use_empty())
+        rc.erase();
+    }
+  }
+
+private:
+  // memref.copy -> nested loops of load and store over the copied shape
+  static void expandCopy(memref::CopyOp cp) {
+    OpBuilder b(cp);
+    Location loc = cp.getLoc();
+    auto ty = cast<MemRefType>(cp.getSource().getType());
+
+    Value zero = b.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = b.create<arith::ConstantIndexOp>(loc, 1);
+    SmallVector<Value> lbs(ty.getRank(), zero), steps(ty.getRank(), one), ubs;
+    for (int64_t d : ty.getShape())
+      ubs.push_back(b.create<arith::ConstantIndexOp>(loc, d));
+
+    Value src = cp.getSource(), dst = cp.getTarget();
+    scf::buildLoopNest(b, loc, lbs, ubs, steps,
+                       [&](OpBuilder &nb, Location l, ValueRange iv) {
+                         Value v = nb.create<memref::LoadOp>(l, src, iv);
+                         nb.create<memref::StoreOp>(l, v, dst, iv);
+                       });
+    cp.erase();
+  }
+
+  // Indices on the cast's shape -> indices on the source's shape.
+  static SmallVector<Value> relabel(OpBuilder &b, Location loc,
+                                    ValueRange dstIdx, int64_t offset,
+                                    ArrayRef<int64_t> dstStrides,
+                                    MemRefType srcTy) {
+    Value linear = b.create<arith::ConstantIndexOp>(loc, offset);
+    for (auto [idx, st] : llvm::zip(dstIdx, dstStrides)) {
+      Value s = b.create<arith::ConstantIndexOp>(loc, st);
+      linear = b.create<arith::AddIOp>(loc, linear,
+                                       b.create<arith::MulIOp>(loc, idx, s));
+    }
+
+    ArrayRef<int64_t> shape = srcTy.getShape();
+    SmallVector<int64_t> srcStrides(shape.size());
+    int64_t acc = 1;
+    for (int i = (int)shape.size() - 1; i >= 0; --i) {
+      srcStrides[i] = acc;
+      acc *= shape[i];
+    }
+
+    SmallVector<Value> out;
+    for (size_t j = 0; j < shape.size(); ++j) {
+      if (shape[j] == 1) {            // unit dims are always index zero
+        out.push_back(b.create<arith::ConstantIndexOp>(loc, 0));
+        continue;
+      }
+      Value q = linear;
+      if (srcStrides[j] != 1)
+        q = b.create<arith::DivSIOp>(
+            loc, q, b.create<arith::ConstantIndexOp>(loc, srcStrides[j]));
+      if (j != 0)                     // the outermost index cannot overflow
+        q = b.create<arith::RemSIOp>(
+            loc, q, b.create<arith::ConstantIndexOp>(loc, shape[j]));
+      out.push_back(q);
+    }
+    return out;
   }
 };
 
@@ -1058,6 +1196,11 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addNestedPass<func::FuncOp>(memref::createFoldMemRefAliasOpsPass());
   pm.addPass(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(createElideCopyAlloc());
+
+  // Casts left over from reshapes become plain indexed accesses, so the
+  // buffers behind them can join the arena like any other.
+  pm.addNestedPass<func::FuncOp>(createReinterpretCastToIndex());
+  pm.addPass(createCanonicalizerPass());
 
   // Buffers become arena slices only once the loops exist, so every access is
   // a plain load or store the rewrite can follow.

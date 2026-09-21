@@ -33,6 +33,7 @@ run_case "$ROOT/test-input/tosa_matmul_i16.mlir"  main_batch.c batch
 run_case "$ROOT/test-input/int_matmul.mlir"       main.c       square_cpu --cpu
 run_case "$ROOT/test-input/q88_requant.mlir"      main_q88.c   q88
 run_case "$ROOT/test-input/rescale.mlir"          main_rescale.c rescale --cpu
+run_case "$ROOT/test-ops/reduce_max.mlir"         main_reduce_max.c reduce_max --cpu
 
 # The accelerator path must produce the same numbers as the CPU path, so both
 # are compiled into one program and compared element by element.

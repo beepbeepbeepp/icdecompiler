@@ -149,4 +149,18 @@ def PrintSummary : Pass<"icdec-print-summary", "::mlir::ModuleOp"> {
   }];
 }
 
+def ReinterpretCastToIndex : Pass<"icdec-reinterpret-cast-to-index", "::mlir::func::FuncOp"> {
+  let summary = "Rewrite accesses through reinterpret_cast as accesses to the source";
+  let description = [{
+    A reinterpret_cast over contiguous memory only relabels the shape. EmitC
+    cannot express that relabelling, so every load and store through the cast
+    is rewritten to address the source directly: the index is linearised with
+    the cast's strides, then split back into the source's shape.
+
+    Copies through a cast are expanded into loops first so they reduce to the
+    same load/store case. Once nothing uses the cast it is erased.
+  }];
+  let dependentDialects = ["mlir::memref::MemRefDialect", "mlir::arith::ArithDialect", "mlir::scf::SCFDialect"];
+}
+
 #endif // STANDALONE_PASS
