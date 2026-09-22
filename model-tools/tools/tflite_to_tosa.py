@@ -343,18 +343,22 @@ def _fully_connected(b, op):
            f" {mlir_type([1, n_in, n_out], 'i8')},"
            f" tensor<1xi8>, tensor<1xi8>) -> {mlir_type(acc3, 'i32')}")
 
-    # add bias, broadcast over the batch dimension
-    bs = b.fresh("s")
-    b.emit(f"{bs} = tosa.const_shape {{values = dense<[1, 1, {n_out}]>"
-           f" : tensor<3xindex>}} : () -> !tosa.shape<3>")
-    b_r = b.fresh("v")
-    b.emit(f"{b_r} = tosa.reshape {b.name_of(bias_idx)}, {bs}"
-           f" : ({mlir_type(m.shape(bias_idx), 'i32')}, !tosa.shape<3>)"
-           f" -> {mlir_type([1, 1, n_out], 'i32')}")
-    n_add = b.fresh("a")
-    b.emit(f"{n_add} = tosa.add {n_mm}, {b_r}"
-           f" : ({mlir_type(acc3, 'i32')}, {mlir_type([1, 1, n_out], 'i32')})"
-           f" -> {mlir_type(acc3, 'i32')}")
+    # add bias, broadcast over the batch dimension. TFLite drops an all-zero
+    # bias and marks the slot -1, so it may simply not be there.
+    if bias_idx < 0:
+        n_add = n_mm
+    else:
+        bs = b.fresh("s")
+        b.emit(f"{bs} = tosa.const_shape {{values = dense<[1, 1, {n_out}]>"
+               f" : tensor<3xindex>}} : () -> !tosa.shape<3>")
+        b_r = b.fresh("v")
+        b.emit(f"{b_r} = tosa.reshape {b.name_of(bias_idx)}, {bs}"
+               f" : ({mlir_type(m.shape(bias_idx), 'i32')}, !tosa.shape<3>)"
+               f" -> {mlir_type([1, 1, n_out], 'i32')}")
+        n_add = b.fresh("a")
+        b.emit(f"{n_add} = tosa.add {n_mm}, {b_r}"
+               f" : ({mlir_type(acc3, 'i32')}, {mlir_type([1, 1, n_out], 'i32')})"
+               f" -> {mlir_type(acc3, 'i32')}")
 
     # back to the 2-D output shape before rescaling
     os_ = b.fresh("s")
@@ -445,6 +449,128 @@ def _mean(b, op):
            f" : ({mlir_type(sum_shape, 'i8')}, !tosa.shape<{len(out_shape)}>)"
            f" -> {mlir_type(out_shape, 'i8')}")
     b.bind(dst, n)
+
+def _fused_relu(b, act, src, dst_idx):
+    """Apply a fused activation, clamping at the output zero point."""
+    if act == 0:                                   # NONE
+        return src
+    if act != 1:                                   # only RELU for now
+        raise NotImplementedError(f"fused activation {act} not supported")
+    _, out_zps = b.model.quant(dst_idx)
+    zp = int(out_zps[0])
+    ty = mlir_type(b.model.shape(dst_idx), "i8")
+    n = b.fresh("v")
+    b.emit(f"{n} = tosa.clamp {src} {{ min_val = {zp} : i8, max_val = 127 : i8 }}"
+           f" : ({ty}) -> {ty}")
+    return n
+
+
+@handler("DEPTHWISE_CONV_2D")
+def _depthwise_conv2d(b, op):
+    """TFLite stores the filter as [1, KH, KW, C*M]; TOSA wants [KH, KW, C, M].
+    The bytes are already in that order, so only the declared shape changes."""
+    o = op.raw.BuiltinOptions()
+    opts = tflite.DepthwiseConv2DOptions()
+    opts.Init(o.Bytes, o.Pos)
+
+    x_idx, w_idx = op.inputs[0], op.inputs[1]
+    bias_idx = op.inputs[2] if len(op.inputs) > 2 else -1
+    dst = op.outputs[0]
+    m = b.model
+
+    in_shape = m.shape(x_idx)                      # [N, H, W, C]
+    w_tfl = m.shape(w_idx)                         # [1, KH, KW, C*M]
+    out_shape = m.shape(dst)
+    C = in_shape[3]
+    KH, KW, CM = w_tfl[1], w_tfl[2], w_tfl[3]
+    w_shape = [KH, KW, C, CM // C]
+
+    x = b.name_of(x_idx)
+    w = b.name_of_as(w_idx, w_shape)
+    bias = b.name_of(bias_idx)
+
+    sh, sw = opts.StrideH(), opts.StrideW()
+    dh, dw = opts.DilationHFactor(), opts.DilationWFactor()
+    if opts.Padding() == tflite.Padding.SAME:
+        pt, pb = _same_padding(in_shape[1], KH, sh, dh)
+        pl, pr = _same_padding(in_shape[2], KW, sw, dw)
+    else:
+        pt = pb = pl = pr = 0
+
+    _, in_zps = m.quant(x_idx)
+    _, w_zps = m.quant(w_idx)
+    n_izp = b.const([int(in_zps[0])], [1], "i8")
+    n_wzp = b.const([int(w_zps[0])], [1], "i8")
+
+    n_acc = b.fresh("a")
+    b.emit(f"{n_acc} = tosa.depthwise_conv2d {x}, {w}, {bias}, {n_izp}, {n_wzp} {{"
+           f" acc_type = i32,"
+           f" dilation = array<i64: {dh}, {dw}>,"
+           f" pad = array<i64: {pt}, {pb}, {pl}, {pr}>,"
+           f" stride = array<i64: {sh}, {sw}> }}"
+           f" : ({mlir_type(in_shape, 'i8')}, {mlir_type(w_shape, 'i8')},"
+           f" {mlir_type(m.shape(bias_idx), 'i32')},"
+           f" tensor<1xi8>, tensor<1xi8>) -> {mlir_type(out_shape, 'i32')}")
+
+    n_out = b.rescale(n_acc, x_idx, dst, weight_idx=w_idx)
+    b.bind(dst, _fused_relu(b, opts.FusedActivationFunction(), n_out, dst))
+
+
+@handler("ADD")
+def _add(b, op):
+    """Quantized add. The inputs usually have different scales, so each is
+    brought to a shared i32 scale first, added, then rescaled to the output.
+    Same left-shift-by-20 scheme as the TFLite reference kernel."""
+    o = op.raw.BuiltinOptions()
+    opts = tflite.AddOptions()
+    opts.Init(o.Bytes, o.Pos)
+
+    a_idx, c_idx = op.inputs[0], op.inputs[1]
+    dst = op.outputs[0]
+    m = b.model
+    shape = list(m.shape(dst))
+    if list(m.shape(a_idx)) != shape or list(m.shape(c_idx)) != shape:
+        raise NotImplementedError("ADD with broadcasting is not supported yet")
+
+    def q(idx):
+        s, z = m.quant(idx)
+        return float(s[0]), int(z[0])
+
+    sa, za = q(a_idx)
+    sc, zc = q(c_idx)
+    so, zo = q(dst)
+
+    left_shift = 20
+    twice_max = 2.0 * max(sa, sc)
+    ty8, ty32 = mlir_type(shape, "i8"), mlir_type(shape, "i32")
+
+    def rescale(src, mult, in_zp, in_ty, in_zp_ty, out_zp, out_ty, out_zp_ty):
+        m0, shift = quantize_multiplier(mult)
+        n_mul = b.const([m0], [1], "i32")
+        n_shf = b.const([shift], [1], "i8")
+        n_izp = b.const([in_zp], [1], in_zp_ty)
+        n_ozp = b.const([out_zp], [1], out_zp_ty)
+        n = b.fresh("r")
+        b.emit(f"{n} = tosa.rescale {src}, {n_mul}, {n_shf}, {n_izp}, {n_ozp} {{"
+               f" scale32 = true,"
+               f" rounding_mode = #tosa.rounding_mode<DOUBLE_ROUND>,"
+               f" per_channel = false,"
+               f" input_unsigned = false, output_unsigned = false }}"
+               f" : ({in_ty}, tensor<1xi32>, tensor<1xi8>,"
+               f" tensor<1x{in_zp_ty}>, tensor<1x{out_zp_ty}>) -> {out_ty}")
+        return n
+
+    ra = rescale(b.name_of(a_idx), sa / twice_max * (1 << left_shift),
+                 za, ty8, "i8", 0, ty32, "i32")
+    rc = rescale(b.name_of(c_idx), sc / twice_max * (1 << left_shift),
+                 zc, ty8, "i8", 0, ty32, "i32")
+
+    n_sum = b.fresh("a")
+    b.emit(f"{n_sum} = tosa.add {ra}, {rc} : ({ty32}, {ty32}) -> {ty32}")
+
+    n_out = rescale(n_sum, twice_max / ((1 << left_shift) * so),
+                    0, ty32, "i32", zo, ty8, "i8")
+    b.bind(dst, _fused_relu(b, opts.FusedActivationFunction(), n_out, dst))
 
 def main():
     ap = argparse.ArgumentParser()

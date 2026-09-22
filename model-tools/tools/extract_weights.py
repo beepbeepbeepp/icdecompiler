@@ -67,7 +67,8 @@ class Model:
             if kind not in ("CONV_2D", "DEPTHWISE_CONV_2D", "FULLY_CONNECTED"):
                 continue
             ins = [op.Inputs(j) for j in range(op.InputsLength())]
-            yield kind, ins[1], ins[2], ins[0], op.Outputs(0)
+            bias = ins[2] if len(ins) > 2 else -1
+            yield kind, ins[1], bias, ins[0], op.Outputs(0)
 
 
 def c_array(ctype, name, arr, dims, per_line):
@@ -109,7 +110,7 @@ def main():
         name = f"{base}{counters[kind]}"
 
         w, w_scales, _ = m.tensor(wi)
-        b, _, _ = m.tensor(bi)
+        b = m.tensor(bi)[0] if bi >= 0 else None
         _, in_scales, in_zps = m.tensor(ii)
         _, out_scales, out_zps = m.tensor(oi)
 
@@ -117,17 +118,27 @@ def main():
         mult = (in_scales[0] * w_scales) / out_scales[0]
         m0, shift = zip(*(quantize_multiplier(v) for v in mult))
 
-        # dense weights are stored [out, in]; transpose to [1, in, out]
-        w_out = w.T[None] if kind == "FULLY_CONNECTED" else w
+            # dense weights are stored [out, in]; transpose to [1, in, out]
+        if kind == "FULLY_CONNECTED":
+            w_out = w.T[None]
+        elif kind == "DEPTHWISE_CONV_2D":
+            # TFLite [1, KH, KW, C*M] -> TOSA [KH, KW, C, M]; the bytes already
+            # sit in that order, only the declared shape changes
+            c_in = int(m.sg.Tensors(ii).ShapeAsNumpy()[-1])
+            w_out = w.reshape(w.shape[1], w.shape[2], c_in, w.shape[3] // c_in)
+        else:
+            w_out = w
 
         src += [c_array("int8_t", f"{prefix}_{name}_w", w_out, dims_of(w_out.shape), 16), ""]
-        src += [c_array("int32_t", f"{prefix}_{name}_b", b, dims_of(b.shape), 8), ""]
+        if b is not None:
+            src += [c_array("int32_t", f"{prefix}_{name}_b", b, dims_of(b.shape), 8), ""]
         src += [c_array("int32_t", f"{prefix}_{name}_m0", np.array(m0), f"[{len(m0)}]", 8), ""]
         src += [c_array("int32_t", f"{prefix}_{name}_shift", np.array(shift), f"[{len(shift)}]", 8), ""]
 
-        hdr += [f"extern const int8_t  {prefix}_{name}_w{dims_of(w_out.shape)};",
-                f"extern const int32_t {prefix}_{name}_b{dims_of(b.shape)};",
-                f"extern const int32_t {prefix}_{name}_m0[{len(m0)}];",
+        hdr += [f"extern const int8_t  {prefix}_{name}_w{dims_of(w_out.shape)};"]
+        if b is not None:
+            hdr += [f"extern const int32_t {prefix}_{name}_b{dims_of(b.shape)};"]
+        hdr += [f"extern const int32_t {prefix}_{name}_m0[{len(m0)}];",
                 f"extern const int32_t {prefix}_{name}_shift[{len(shift)}];",
                 f"#define {prefix.upper()}_{name.upper()}_IN_ZP  ({int(in_zps[0])})",
                 f"#define {prefix.upper()}_{name.upper()}_OUT_ZP ({int(out_zps[0])})",

@@ -56,14 +56,20 @@ are rounded once instead of twice.
 ## Supported layers
 
 - Conv1D and Conv2D
+- DepthwiseConv1D and DepthwiseConv2D
+- Add, for residual connections (same-shape inputs only)
 - MaxPooling
-- Dense
+- Dense, with or without bias
 - GlobalAveragePooling
 - Reshape, Flatten
 - Softmax, which is skipped since argmax is enough for classification
 
-Not yet supported: DepthwiseConv, residual connections, LSTM, GRU,
-AveragePooling, Transpose.
+Not yet supported: LSTM, GRU, AveragePooling, Transpose, Add with
+broadcasting.
+
+INT8 models run on the CPU. Their convolutions and dense layers carry zero
+points, and the accelerator path only takes Q8.8 for now, so with `--array`
+they still fall back to the CPU and stay correct.
 
 A model using an unsupported layer is rejected by name. Adding one means
 writing a function in `tools/tflite_to_tosa.py` or `tools/keras_to_tosa_q88.py`
