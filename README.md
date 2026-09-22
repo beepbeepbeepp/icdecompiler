@@ -61,6 +61,20 @@ counting them the same way would misrepresent where the time goes.
 Scratch memory is the working buffers, which the arena allocator packs by
 lifetime. Weights are not included, since they arrive as parameters.
 
+## Math functions on cores without an FPU
+
+Operations like `exp` and `sigmoid` lower to libm calls such as `expf`. The
+libm shipped with the PULP toolchain is built with the F extension, so on a
+core without an FPU those calls trap.
+
+For such targets, add `runtime/icdec_expf.c` to the firmware build. Compiled
+with the application's flags it uses soft-float only, and the linker picks it
+over the libm version. On a core that does have an FPU, leave it out: the libm
+version is faster there.
+
+Only models that actually use these operations need it. `grep expf model.c`
+tells you.
+
 ## What it does
 
 The pipeline lowers TOSA to linalg, bufferizes, then splits the work:

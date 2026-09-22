@@ -51,3 +51,9 @@ sed 's/conv_accel/conv_cpu/' "$TMP/conv_cpu.c" > "$TMP/cc1.c"
 gcc -O2 -I"$HERE" "$TMP/cc1.c" "$TMP/cc2.c" "$HERE/main_conv_accel.c" \
     -o "$TMP/test_conv_accel"
 "$TMP/test_conv_accel"
+
+
+# Soft-float expf for cores without an FPU, checked against the host libm.
+gcc -O2 -fno-builtin -Dexpf=icdec_expf -c "$ROOT/runtime/icdec_expf.c" -o "$TMP/icdec_expf.o"
+gcc -O2 "$HERE/main_icdec_expf.c" "$TMP/icdec_expf.o" -o "$TMP/test_icdec_expf" -lm
+"$TMP/test_icdec_expf" | tail -1
