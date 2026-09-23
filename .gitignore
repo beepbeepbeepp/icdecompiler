@@ -1,2 +1,12 @@
 build/
 icdecompiler-bin-*.tar.gz
+
+# LaTeX manual: keep the source, not what it builds
+docs/manual/icdecompiler-manual*.pdf
+docs/manual/*.aux
+docs/manual/*.log
+docs/manual/*.toc
+docs/manual/*.out
+docs/manual/*.fls
+docs/manual/*.fdb_latexmk
+docs/manual/*.synctex.gz
