@@ -16,7 +16,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS="$HERE/tools"
-COMPILER="${ICDECOMPILER:-$HERE/../icdecompiler/icdecompiler}"
+COMPILER="${ICDECOMPILER:-$HERE/../icdecompiler}"
 
 usage() {
     cat >&2 <<'EOF'
