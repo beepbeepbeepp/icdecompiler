@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+out/
+*_test
+*.o
+
+# Model dan bobot hasil penelitian lab tidak disertakan.
+# Lihat examples/har/README.md untuk cara menyiapkannya.
+examples/har/*.tflite
+examples/har/savedmodelhar/

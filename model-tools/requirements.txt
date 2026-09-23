@@ -1,0 +1,6 @@
+# Reading and verifying models. TensorFlow is only needed for the Q8.8 path,
+# which reads a float SavedModel.
+numpy
+tflite
+ai-edge-litert
+tensorflow
