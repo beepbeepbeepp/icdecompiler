@@ -6,7 +6,7 @@
 # went to the array.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(dirname "$HERE")"
+ROOT="$(dirname "$(dirname "$HERE")")"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

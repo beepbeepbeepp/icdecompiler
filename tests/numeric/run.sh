@@ -4,7 +4,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(dirname "$HERE")"
+ROOT="$(dirname "$(dirname "$HERE")")"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -27,20 +27,20 @@ run_case() {
   "$TMP/test_$name"
 }
 
-run_case "$ROOT/test-input/int_matmul.mlir"       main.c       square
-run_case "$ROOT/test-input/int_matmul_rect.mlir"  main_rect.c  rect
-run_case "$ROOT/test-input/tosa_matmul_i16.mlir"  main_batch.c batch
-run_case "$ROOT/test-input/int_matmul.mlir"       main.c       square_cpu --cpu
-run_case "$ROOT/test-input/q88_requant.mlir"      main_q88.c   q88
-run_case "$ROOT/test-input/rescale.mlir"          main_rescale.c rescale --cpu
-run_case "$ROOT/test-ops/reduce_max.mlir"         main_reduce_max.c reduce_max --cpu
-run_case "$ROOT/test-ops/exp.mlir"                main_exp.c   exp --cpu
-CASE_CFLAGS=-DSIGMOID run_case "$ROOT/test-ops/sigmoid.mlir" main_exp.c sigmoid --cpu
+run_case "$ROOT/tests/inputs/int_matmul.mlir"       main.c       square
+run_case "$ROOT/tests/inputs/int_matmul_rect.mlir"  main_rect.c  rect
+run_case "$ROOT/tests/inputs/tosa_matmul_i16.mlir"  main_batch.c batch
+run_case "$ROOT/tests/inputs/int_matmul.mlir"       main.c       square_cpu --cpu
+run_case "$ROOT/tests/inputs/q88_requant.mlir"      main_q88.c   q88
+run_case "$ROOT/tests/inputs/rescale.mlir"          main_rescale.c rescale --cpu
+run_case "$ROOT/tests/ops/reduce_max.mlir"         main_reduce_max.c reduce_max --cpu
+run_case "$ROOT/tests/ops/exp.mlir"                main_exp.c   exp --cpu
+CASE_CFLAGS=-DSIGMOID run_case "$ROOT/tests/ops/sigmoid.mlir" main_exp.c sigmoid --cpu
 
 # The accelerator path must produce the same numbers as the CPU path, so both
 # are compiled into one program and compared element by element.
-"$ROOT/icdecompiler" "$ROOT/test-input/conv_accel.mlir" --cpu -o "$TMP/conv_cpu.c" > /dev/null 2>&1
-"$ROOT/icdecompiler" "$ROOT/test-input/conv_accel.mlir"        -o "$TMP/conv_acc.c" > /dev/null 2>&1
+"$ROOT/icdecompiler" "$ROOT/tests/inputs/conv_accel.mlir" --cpu -o "$TMP/conv_cpu.c" > /dev/null 2>&1
+"$ROOT/icdecompiler" "$ROOT/tests/inputs/conv_accel.mlir"        -o "$TMP/conv_acc.c" > /dev/null 2>&1
 
 sed 's/conv_accel/conv_cpu/' "$TMP/conv_cpu.c" > "$TMP/cc1.c"
 {
