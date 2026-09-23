@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Package the built compiler so it can be used without building LLVM.
+# Package the built compiler and model tools so they can be used without
+# building LLVM.
 #
 #   ./make-release.sh
 #
-# Produces icdecompiler-bin-<date>.tar.gz. Upload it as a GitHub release; the
-# install script on the other end unpacks it.
+# Produces icdecompiler-bin-<date>.tar.gz. Upload it as a GitHub release.
 
 set -euo pipefail
 
@@ -33,32 +33,42 @@ done
 cp "$HERE/icdecompiler" "$DIST/"
 cp "$HERE/systolic_drv.h" "$DIST/"
 
+# Tracked files only: no venv, no caches, no lab models that are gitignored.
+# Note this packages the last commit, not uncommitted edits.
+git -C "$HERE" archive HEAD model-tools runtime | tar -x -C "$DIST"
+
 cat > "$DIST/README.md" <<'EOF'
 # ICDeCompiler, binary release
 
-Compiler siap pakai, tidak perlu membangun LLVM.
+Compiler and model tools, ready to use without building LLVM.
 
-## Pasang
+## Contents
 
-```bash
-tar xzf icdecompiler-bin-*.tar.gz
-sudo ln -s "$PWD/icdecompiler/icdecompiler" /usr/local/bin/icdecompiler
-```
+    icdecompiler            compiler driver
+    standalone-opt          MLIR pass pipeline
+    standalone-translate    MLIR to C
+    model-tools/            weight extraction, importers, verification
+    runtime/                soft-float expf for cores without an FPU
+    systolic_drv.h          accelerator driver interface
 
-Atau tanpa symlink, panggil langsung dengan path lengkapnya.
+## Setup
 
-## Pakai
+    python3 -m venv model-tools/.venv
+    source model-tools/.venv/bin/activate
+    pip install -r model-tools/requirements.txt
 
-```bash
-icdecompiler model.mlir --cpu -o model.c    # semua di CPU
-icdecompiler model.mlir -o model.c          # matmul ke systolic array
-```
+## Use
 
-Untuk mode array, `systolic_drv.h` harus ada di folder yang sama dengan kode C
-saat dikompilasi. Versi yang disertakan di sini adalah driver AXI lama; pakai
-driver HWPE dari tim hardware kalau targetnya board dengan HWPE.
+    ./model-tools/build_model.sh --int8 model.tflite net -o out/
+    ./model-tools/build_model.sh --q88  savedmodel   net -o out/ --array
 
-Butuh Ubuntu dengan glibc yang tidak terlalu jauh berbeda dari mesin pembuat.
+Produces net.c, net_weights.c, net_weights.h and net.mlir in out/.
+
+In array mode the generated code includes systolic_drv.h. The copy here is the
+interface the compiler targets; use the driver from the hardware team for the
+actual board.
+
+Needs a Linux with a glibc not much older than the machine that built this.
 EOF
 
 tar czf "$OUT" -C "$STAGE" icdecompiler
