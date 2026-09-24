@@ -3,9 +3,9 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include "har_weights_q88.h"
+#include "har_weights.h"
 
-void har_model(int16_t input[1][1][512][3],
+void har(int16_t input[1][1][512][3],
                int16_t w1[16][1][15][3], int32_t b1[16],
                int16_t w2[32][1][7][16],  int32_t b2[32],
                int16_t w3[64][1][3][32],  int32_t b3[64],
@@ -26,7 +26,7 @@ int main(void)
             input[0][0][i][c] = (int16_t)v;
         }
 
-    har_model(input,
+    har(input,
               (int16_t (*)[1][15][3])har_conv1_w, (int32_t *)har_conv1_b,
               (int16_t (*)[1][7][16])har_conv2_w, (int32_t *)har_conv2_b,
               (int16_t (*)[1][3][32])har_conv3_w, (int32_t *)har_conv3_b,

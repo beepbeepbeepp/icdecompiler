@@ -686,6 +686,10 @@ private:
 // index into that arena. Rewriting the accesses rather than handing out
 // pointers keeps everything in terms emitc can already lower.
 //
+// Buffers handed to the accelerator driver are reached through a pointer to
+// their first element. Those join the arena too: the pointer becomes the
+// address of their slot, and their lifetime runs until the driver call is done.
+//
 // Buffers used in ways the rewrite cannot follow still become globals, just
 // without sharing, so nothing falls back to malloc.
 class AllocToArena : public impl::AllocToArenaBase<AllocToArena> {
@@ -732,15 +736,22 @@ public:
 
       unsigned first = order[&op];
       unsigned last = first;
-      bool accessesOnly = true;
+      bool followable = true;
       for (Operation *user : alloc.getResult().getUsers()) {
-        if (!isa<memref::LoadOp, memref::StoreOp, memref::DeallocOp>(user)) {
-          accessesOnly = false;     // something the rewrite cannot follow
+        if (isa<memref::LoadOp, memref::StoreOp, memref::DeallocOp>(user)) {
+          last = std::max(last, indexOf(user));
+          continue;
+        }
+        auto rc = dyn_cast<UnrealizedConversionCastOp>(user);
+        std::optional<unsigned> end =
+            rc ? pointerUseEnd(rc, indexOf) : std::nullopt;
+        if (!end) {
+          followable = false;         // something the rewrite cannot follow
           break;
         }
-        last = std::max(last, indexOf(user));
+        last = std::max(last, *end);
       }
-      if (!accessesOnly)
+      if (!followable)
         continue;
 
       byType[ty.getElementType()].push_back(
@@ -817,6 +828,11 @@ public:
             dealloc.erase();
             continue;
           }
+          if (auto rc = dyn_cast<UnrealizedConversionCastOp>(user)) {
+            rewritePointer(builder, rc, arena, arenaElems, elemType, s.offset,
+                           strides);
+            continue;
+          }
 
           builder.setInsertionPoint(user);
           Location loc = user->getLoc();
@@ -850,7 +866,8 @@ public:
       }
     }
 
-    fn->setAttr("icdec.arena_bytes", builder.getI64IntegerAttr(totalArenaBytes));
+    fn->setAttr("icdec.arena_bytes",
+                builder.getI64IntegerAttr(totalArenaBytes));
 
     // Anything the arena could not take still needs to stay off the heap.
     SmallVector<memref::AllocOp> leftovers;
@@ -884,6 +901,86 @@ public:
     });
     for (memref::DeallocOp d : deadDeallocs)
       d.erase();
+  }
+
+private:
+  static std::optional<int64_t> constantIndex(Value v) {
+    if (auto c = v.getDefiningOp<emitc::ConstantOp>())
+      if (auto a = dyn_cast<IntegerAttr>(c.getValue()))
+        return a.getInt();
+    if (auto c = v.getDefiningOp<arith::ConstantOp>())
+      if (auto a = dyn_cast<IntegerAttr>(c.getValue()))
+        return a.getInt();
+    return std::nullopt;
+  }
+
+  // A buffer handed to the driver is reached as
+  //   cast(memref -> emitc.array) -> subscript[constants] -> address_of
+  // and the pointer is passed to the call. Returns where the last use of that
+  // pointer is, or nothing if the chain has any other shape.
+  static std::optional<unsigned>
+  pointerUseEnd(UnrealizedConversionCastOp rc,
+                llvm::function_ref<unsigned(Operation *)> indexOf) {
+    if (rc->getNumResults() != 1 ||
+        !isa<emitc::ArrayType>(rc->getResult(0).getType()))
+      return std::nullopt;
+
+    unsigned end = indexOf(rc);
+    for (Operation *s : rc->getResult(0).getUsers()) {
+      auto sub = dyn_cast<emitc::SubscriptOp>(s);
+      if (!sub)
+        return std::nullopt;
+      for (Value idx : sub.getIndices())
+        if (!constantIndex(idx))
+          return std::nullopt;
+      for (Operation *a : sub->getResult(0).getUsers()) {
+        auto addr = dyn_cast<emitc::AddressOfOp>(a);
+        if (!addr)
+          return std::nullopt;
+        // +1 keeps the buffer live through the wait that follows the call
+        for (Operation *u : addr->getResult(0).getUsers())
+          end = std::max(end, indexOf(u) + 1);
+      }
+    }
+    return end;
+  }
+
+  // Point the driver at the buffer's slot in the arena instead.
+  static void rewritePointer(OpBuilder &b, UnrealizedConversionCastOp rc,
+                             Value arena, int64_t arenaElems, Type elemTy,
+                             int64_t offset, ArrayRef<int64_t> strides) {
+    auto arrTy = emitc::ArrayType::get({arenaElems}, elemTy);
+    auto ptrTy = emitc::PointerType::get(elemTy);
+
+    SmallVector<emitc::SubscriptOp> subs;
+    for (Operation *u : rc->getResult(0).getUsers())
+      subs.push_back(llvm::cast<emitc::SubscriptOp>(u));
+
+    for (emitc::SubscriptOp sub : subs) {
+      int64_t linear = offset;
+      for (auto [i, idx] : llvm::enumerate(sub.getIndices()))
+        linear += *constantIndex(idx) * strides[i];
+
+      SmallVector<emitc::AddressOfOp> addrs;
+      for (Operation *u : sub->getResult(0).getUsers())
+        addrs.push_back(llvm::cast<emitc::AddressOfOp>(u));
+
+      for (emitc::AddressOfOp addr : addrs) {
+        b.setInsertionPoint(addr);
+        Location loc = addr.getLoc();
+        Value arr =
+            b.create<UnrealizedConversionCastOp>(loc, arrTy, arena).getResult(0);
+        Value idx = b.create<emitc::ConstantOp>(loc, b.getIndexType(),
+                                                b.getIndexAttr(linear));
+        Value elem = b.create<emitc::SubscriptOp>(
+            loc, llvm::cast<TypedValue<emitc::ArrayType>>(arr), ValueRange{idx});
+        Value ptr = b.create<emitc::AddressOfOp>(loc, ptrTy, elem);
+        addr->getResult(0).replaceAllUsesWith(ptr);
+        addr.erase();
+      }
+      sub.erase();
+    }
+    rc.erase();
   }
 };
 
