@@ -37,14 +37,15 @@ Every compilation prints a summary:
 ICDeCompiler summary
   input             : 1x1x512x3 i16
   output            : 1x1x4 i16
-  MACs total        : 805275
-  on accelerator    : 612480  (76%) in 5 calls
-  on CPU            : 192795  (23%)
-  scratch memory    : 36864 bytes
+  MACs total        : 612480
+  on accelerator    : 612480  (100%) in 5 calls
+  on CPU            : 0  (0%)
+  scratch memory    : 60398 bytes
 ```
 
-Only multiply-accumulates are counted. Scratch memory is the working buffers;
-weights are not included, since they arrive as parameters.
+Only multiply-accumulates on model data are counted; index arithmetic and
+requantisation are left out. Scratch memory is the working buffers; weights are
+not included, since they arrive as parameters.
 
 ## What is in this repository
 

@@ -13,6 +13,7 @@ import argparse
 import subprocess
 
 import numpy as np
+from savedmodel_layers import layer_names, batchnorm_for
 
 
 def load_folded(path):
@@ -20,21 +21,16 @@ def load_folded(path):
     import tensorflow as tf
     V = {v.name: v.numpy() for v in tf.saved_model.load(path).variables}
 
-    conv_ids = sorted({int(k.split("_")[1].split("/")[0])
-                       for k in V if k.startswith("conv1d_")})
-    dense_ids = sorted({int(k.split("_")[1].split("/")[0])
-                        for k in V if k.startswith("dense_")})
-
     convs, denses = [], []
-    for cid in conv_ids:
-        w, b = V[f"conv1d_{cid}/kernel:0"], V[f"conv1d_{cid}/bias:0"]
-        bn = f"batch_normalization_{cid}"
+    for name in layer_names(V, "conv1d"):
+        w, b = V[f"{name}/kernel:0"], V[f"{name}/bias:0"]
+        bn = batchnorm_for(name, "conv1d")
         if f"{bn}/gamma:0" in V:
             s = V[f"{bn}/gamma:0"] / np.sqrt(V[f"{bn}/moving_variance:0"] + 1e-3)
             w, b = w * s, (b - V[f"{bn}/moving_mean:0"]) * s + V[f"{bn}/beta:0"]
         convs.append((w, b))
-    for did in dense_ids:
-        denses.append((V[f"dense_{did}/kernel:0"], V[f"dense_{did}/bias:0"]))
+    for name in layer_names(V, "dense"):
+        denses.append((V[f"{name}/kernel:0"], V[f"{name}/bias:0"]))
     return convs, denses
 
 

@@ -20,6 +20,7 @@ Usage:
 import argparse
 
 import numpy as np
+from savedmodel_layers import layer_names, batchnorm_for
 
 
 Q88_SCALE = 256          # 2^8
@@ -55,19 +56,14 @@ def fold_batchnorm(w, b, gamma, beta, mean, var, eps=1e-3):
 def collect_layers(V):
     """Pair each conv with its BatchNorm, then append the dense layers.
 
-    Relies on Keras naming: conv1d_<n> and batch_normalization_<n> that share
-    the same index, which is how the functional model is built.
+    A conv and its BatchNorm share the same name suffix, which is how Keras
+    builds a functional model: conv1d_192 goes with batch_normalization_192.
     """
-    conv_ids = sorted({int(k.split("_")[1].split("/")[0])
-                       for k in V if k.startswith("conv1d_")})
-    dense_ids = sorted({int(k.split("_")[1].split("/")[0])
-                        for k in V if k.startswith("dense_")})
-
     layers = []
-    for i, cid in enumerate(conv_ids, start=1):
-        w = V[f"conv1d_{cid}/kernel:0"]          # [K, Cin, F]
-        b = V[f"conv1d_{cid}/bias:0"]
-        bn = f"batch_normalization_{cid}"
+    for i, name in enumerate(layer_names(V, "conv1d"), start=1):
+        w = V[f"{name}/kernel:0"]          # [K, Cin, F]
+        b = V[f"{name}/bias:0"]
+        bn = batchnorm_for(name, "conv1d")
         if f"{bn}/gamma:0" in V:
             w, b = fold_batchnorm(w, b,
                                   V[f"{bn}/gamma:0"], V[f"{bn}/beta:0"],
@@ -75,11 +71,11 @@ def collect_layers(V):
                                   V[f"{bn}/moving_variance:0"])
         layers.append((f"conv{i}", "conv", w, b))
 
-    for i, did in enumerate(dense_ids, start=1):
+    for i, name in enumerate(layer_names(V, "dense"), start=1):
         layers.append((f"fc{i}",
                        "dense",
-                       V[f"dense_{did}/kernel:0"],     # [Cin, Cout]
-                       V[f"dense_{did}/bias:0"]))
+                       V[f"{name}/kernel:0"],     # [Cin, Cout]
+                       V[f"{name}/bias:0"]))
     return layers
 
 

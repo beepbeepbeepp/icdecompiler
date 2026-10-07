@@ -20,6 +20,7 @@ Usage:
 import argparse
 
 import numpy as np
+from savedmodel_layers import layer_names, batchnorm_for
 
 
 # A Q16.16 accumulator shifted back to Q8.8 is an exact >> 8. TOSA spells that
@@ -251,28 +252,32 @@ def _dense(b, st, cfg):
     st["cur"] = n
     st["channels"] = Cout
 
+def input_length(path):
+    """Sequence length the SavedModel expects, read from its serving signature."""
+    import tensorflow as tf
+    for sig in tf.saved_model.load(path).signatures.values():
+        for spec in sig.structured_input_signature[1].values():
+            if spec.shape.rank == 3 and spec.shape[1] is not None:
+                return int(spec.shape[1])
+    return None
+
 def load_weights(path):
     """Read variables from a SavedModel, folding BatchNorm into each conv."""
     import tensorflow as tf
     V = {v.name: v.numpy() for v in tf.saved_model.load(path).variables}
 
-    conv_ids = sorted({int(k.split("_")[1].split("/")[0])
-                       for k in V if k.startswith("conv1d_")})
-    dense_ids = sorted({int(k.split("_")[1].split("/")[0])
-                        for k in V if k.startswith("dense_")})
-
     convs, denses = [], []
-    for cid in conv_ids:
-        w = V[f"conv1d_{cid}/kernel:0"]
-        b = V[f"conv1d_{cid}/bias:0"]
-        bn = f"batch_normalization_{cid}"
+    for name in layer_names(V, "conv1d"):
+        w = V[f"{name}/kernel:0"]
+        b = V[f"{name}/bias:0"]
+        bn = batchnorm_for(name, "conv1d")
         if f"{bn}/gamma:0" in V:
             s = V[f"{bn}/gamma:0"] / np.sqrt(V[f"{bn}/moving_variance:0"] + 1e-3)
             w = w * s
             b = (b - V[f"{bn}/moving_mean:0"]) * s + V[f"{bn}/beta:0"]
         convs.append((w, b))
-    for did in dense_ids:
-        denses.append((V[f"dense_{did}/kernel:0"], V[f"dense_{did}/bias:0"]))
+    for name in layer_names(V, "dense"):
+        denses.append((V[f"{name}/kernel:0"], V[f"{name}/bias:0"]))
     return convs, denses
 
 
@@ -281,8 +286,12 @@ def main():
     ap.add_argument("model", help="SavedModel directory")
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--name", default="model")
-    ap.add_argument("--length", type=int, default=INPUT_LENGTH)
+    ap.add_argument("--length", type=int, default=None, help="input length; read from the model when omitted")
     args = ap.parse_args()
+
+    if args.length is None:
+        args.length = input_length(args.model) or INPUT_LENGTH
+    print(f"input length {args.length}")
 
     convs, denses = load_weights(args.model)
     print(f"{len(convs)} conv layers, {len(denses)} dense layers")

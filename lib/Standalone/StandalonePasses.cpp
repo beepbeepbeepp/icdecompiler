@@ -1165,6 +1165,29 @@ public:
       if (!isa<emitc::MulOp>(op))
         return;
 
+      // Only multiply-accumulates on model data count: a multiply of at most
+      // 32 bits, or a float one, whose result feeds an add. Index arithmetic
+      // is size_t, and requantisation multiplies in 64 bits, so neither is
+      // model work.
+      Type t = op->getResult(0).getType();
+      bool onData = isa<FloatType>(t) ||
+                    (isa<IntegerType>(t) && cast<IntegerType>(t).getWidth() <= 32);
+      // Signed arithmetic is done in unsigned types to keep overflow defined in
+      // C, so the product may pass through a cast or two before the add.
+      std::function<bool(Value, int)> feedsAdd = [&](Value v, int depth) {
+        for (Operation *u : v.getUsers()) {
+          if (isa<emitc::AddOp>(u))
+            return true;
+          if (depth > 0 && isa<emitc::CastOp>(u) &&
+              feedsAdd(u->getResult(0), depth - 1))
+            return true;
+        }
+        return false;
+      };
+      bool accumulates = feedsAdd(op->getResult(0), 3);
+      if (!onData || !accumulates)
+        return;
+
       int64_t trips = 1;
       for (Operation *p = op->getParentOp(); p; p = p->getParentOp()) {
         auto loop = dyn_cast<emitc::ForOp>(p);
