@@ -102,9 +102,9 @@ make and hard to see.
 
 The targets add one more constraint. The RISC-V cores in this SoC use a GCC
 toolchain with extensions such as hardware loops and SIMD instructions that
-LLVM does not support. A compiler that ends in LLVM IR would lose them.
-ICDeCompiler therefore stops at C and leaves final code generation to the
-target's own GCC.
+only the PULP GCC toolchain fully supports. A compiler that ends in LLVM IR
+would lose them. ICDeCompiler therefore stops at C and leaves final code
+generation to the target's own GCC.
 
 ICDeCompiler was built to close this gap: a compiler for the lab's own SoC and
 accelerator, from trained model to code that runs on the hardware. It is built
@@ -215,5 +215,118 @@ The three parts each have one job:
 
 Weights and structure are kept apart on purpose. The weights go straight into
 the firmware as data, while only the structure needs to be compiled.
+
+In the figure, \texttt{net} stands for the name given to the model when the
+files are generated (Section~\ref{sec:usage}).
+
+\section{Installation}
+
+ICDeCompiler can be installed in two ways. The release package is the
+quickest: it contains a ready-built compiler and only needs to be unpacked.
+Building from source is only needed when changing the compiler itself.
+
+In both cases \texttt{model-tools} needs a Python environment of its own, and
+the generated code is built later with the target's GCC, which is not part of
+ICDeCompiler.
+
+\subsection{From the release package}
+
+The release is a single archive with the compiler, \texttt{model-tools}, the
+small runtime the generated code depends on, and a reference copy of the
+accelerator driver header. The compiler binaries have been stripped and depend
+only on standard system libraries, so LLVM does not need to be installed.
+
+\begin{lstlisting}[language=bash]
+tar xzf icdecompiler-bin-<date>.tar.gz
+cd icdecompiler
+./icdecompiler --help
+\end{lstlisting}
+
+The \texttt{icdecompiler} script detects whether it is run from a release
+package or from a source tree, so the same commands work in both.
+
+\subsection{Python environment for model-tools}
+
+\texttt{model-tools} reads TensorFlow Lite and Keras models, so it needs
+TensorFlow and a few other packages. They are listed in
+\texttt{model-tools/requirements.txt}. A virtual environment keeps them apart
+from the rest of the system:
+
+\begin{lstlisting}[language=bash]
+cd model-tools
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+\end{lstlisting}
+
+The environment has to be activated again in every new terminal before
+\texttt{model-tools} is used. Most errors from \texttt{build\_model.sh} that
+mention a missing module come from forgetting this step.
+
+\subsection{From source}
+
+Building from source requires a build of LLVM with MLIR enabled. The compiler
+is developed against LLVM commit \texttt{de26036ecb4b} (30 July 2026). Other
+versions may not work, since MLIR changes often between commits.
+
+\begin{lstlisting}[language=bash]
+git clone https://github.com/beepbeepbeepp/icdecompiler.git
+cd icdecompiler
+mkdir build && cd build
+cmake -G Ninja .. \
+  -DMLIR_DIR=$LLVM_BUILD/lib/cmake/mlir \
+  -DLLVM_DIR=$LLVM_BUILD/lib/cmake/llvm \
+  -DCMAKE_BUILD_TYPE=Release
+ninja
+\end{lstlisting}
+
+\texttt{\$LLVM\_BUILD} is the build directory of LLVM. On a machine with
+limited memory, use \texttt{ninja -j1}. A release package can then be made
+with \texttt{make-release.sh}.
+
+\subsection{Checking the installation}
+
+The source tree comes with a test suite. It compiles a set of small models and
+operators, runs the generated code on the PC, and compares the results with a
+reference:
+
+\begin{lstlisting}[language=bash]
+./tests/run-all.sh
+\end{lstlisting}
+
+Every check prints a line starting with \texttt{OK}, followed by a table of the
+operators that can be compiled to C and those that can run on the accelerator.
+The test suite is not part of the release package.
+
+\section{Usage}
+\label{sec:usage}
+
+Using ICDeCompiler comes down to three steps: generate the C files from the
+trained model, call the generated function from the firmware, and build the
+firmware with the target's GCC. The first step is a single script,
+\texttt{build\_model.sh}, which runs \texttt{model-tools} and the compiler in
+the right order.
+
+\subsection{Choosing a number format}
+
+Two number formats are supported. They are explained in more detail in
+Section~\ref{sec:formats}; for now the choice is simple:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+ & INT8 & Q8.8 \\
+\midrule
+Input model     & quantized \texttt{.tflite} & float SavedModel \\
+Runs on         & CPU only                   & CPU, or CPU with accelerator \\
+Data type       & \texttt{int8\_t}           & \texttt{int16\_t} \\
+Script option   & \texttt{--int8}            & \texttt{--q88} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Use INT8 when the model will run on the CPU and memory is tight. Use Q8.8 when
+the accelerator is needed, since the accelerator currently only accepts Q8.8
+data.
 
 \end{document}
