@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import os
 import json
 import math
 
@@ -96,7 +97,7 @@ def main():
     m = Model(args.model)
 
     src = [f"/* Generated from {args.model}. Do not edit by hand. */",
-           "", f'#include "{args.out}.h"', ""]
+           "", f'#include "{os.path.basename(args.out)}.h"', ""]
     hdr = [f"/* Generated from {args.model}. Do not edit by hand. */",
            f"#ifndef {prefix.upper()}_H", f"#define {prefix.upper()}_H",
            "#include <stdint.h>", ""]

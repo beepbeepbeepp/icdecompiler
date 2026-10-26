@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import os
 
 import numpy as np
 from savedmodel_layers import layer_names, batchnorm_for
@@ -105,7 +106,7 @@ def main():
     layers = collect_layers(V)
 
     src = [f"/* Q8.8 weights generated from {args.model}. Do not edit by hand. */",
-           "", f'#include "{args.out}.h"', ""]
+            "", f'#include "{os.path.basename(args.out)}.h"', ""]
     hdr = [f"/* Q8.8 weights generated from {args.model}. Do not edit by hand. */",
            f"#ifndef {prefix.upper()}_Q88_H", f"#define {prefix.upper()}_Q88_H",
            "#include <stdint.h>", "",

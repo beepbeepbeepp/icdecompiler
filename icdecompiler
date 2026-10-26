@@ -14,10 +14,26 @@ fi
 OPT="$BIN/standalone-opt"
 TRANSLATE="$BIN/standalone-translate"
 
+usage() {
+  cat <<'EOF'
+usage: icdecompiler <input.mlir> [-o output.c] [--cpu]
+
+Lower a TOSA (or linalg) MLIR file to C.
+
+  -o FILE   write the C code to FILE instead of stdout
+  --cpu     keep everything on the CPU (default: matmul goes to the
+            systolic array through systolic_multiply_large)
+  -h, --help  show this help
+EOF
+}
+
 if [[ $# -lt 1 ]]; then
-  echo "usage: icdecompiler <input.mlir> [-o output.c] [--cpu]" >&2
+  usage >&2
   exit 1
 fi
+case "$1" in
+  -h|--help) usage; exit 0 ;;
+esac
 
 INPUT="$1"; shift
 OUTPUT=""
