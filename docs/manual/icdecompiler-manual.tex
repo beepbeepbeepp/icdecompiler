@@ -329,4 +329,166 @@ Use INT8 when the model will run on the CPU and memory is tight. Use Q8.8 when
 the accelerator is needed, since the accelerator currently only accepts Q8.8
 data.
 
+\subsection{Generating the C files}
+\label{sec:generate}
+
+\texttt{build\_model.sh} is run from the \texttt{model-tools} directory, with the Python environment activated:
+
+\begin{lstlisting}[language=bash]
+build_model.sh --int8|--q88 <model> <name> [-o outdir] [--array]
+\end{lstlisting}
+
+\begin{description}
+  \item[\texttt{--int8} or \texttt{--q88}] the number format, as chosen above.
+  \item[\texttt{<model>}] the trained model: a \texttt{.tflite} file for
+    INT8, a SavedModel directory for Q8.8.
+  \item[\texttt{<name>}] the name used for the generated files and for the
+    inference function.
+  \item[\texttt{-o outdir}] the directory the files are written to.
+  \item[\texttt{--array}] send matrix multiplications to the accelerator.
+    Without it, everything runs on the CPU.
+\end{description}
+
+For example, the small test model in \texttt{examples/tiny-cnn}, in Q8.8 with the accelerator:
+
+\begin{lstlisting}[language=bash]
+./build_model.sh --q88 examples/tiny-cnn/savedmodel_tiny tiny \
+  -o out/ --array
+\end{lstlisting}
+
+The example model is included in the release package and in the source tree.
+It is a small network with random weights, made by
+\texttt{examples/tiny-cnn/make\_tiny\_cnn.py}, and is useful for checking that
+everything works before trying a real model.
+
+This writes four files:
+
+\begin{description}
+  \item[\texttt{tiny.c}] the inference function \texttt{tiny()}.
+  \item[\texttt{tiny\_weights.c}, \texttt{tiny\_weights.h}] the weights and
+    biases as constant C arrays.
+  \item[\texttt{tiny.mlir}] the model structure in TOSA. The firmware does not
+    need it, but it is useful when something goes wrong.
+\end{description}
+
+The script runs the compiler itself. The compiler can also be run on its own,
+on a TOSA file:
+
+\begin{lstlisting}[language=bash]
+./icdecompiler tiny.mlir -o tiny.c          # accelerator
+./icdecompiler tiny.mlir -o tiny.c --cpu    # CPU only
+\end{lstlisting}
+
+The two defaults are opposite: \texttt{build\_model.sh} keeps everything on
+the CPU unless \texttt{--array} is given, while \texttt{icdecompiler} uses the
+accelerator unless \texttt{--cpu} is given.
+
+\subsection{The compiler summary}
+
+At the end of each run the compiler prints a short summary. For the example
+above:
+
+\begin{lstlisting}
+ICDeCompiler summary
+  input             : 1x1x64x3 i16
+  output            : 1x1x4 i16
+  MACs total        : 3552
+  on accelerator    : 3552  (100%) in 5 calls
+  on CPU            : 0  (0%)
+  scratch memory    : 2506 bytes
+\end{lstlisting}
+
+\begin{description}
+  \item[input, output] the shape and element type of the input and output
+    arrays.
+  \item[MACs total] the number of multiply-accumulate operations in one
+    inference. Only operations on model data are counted; index arithmetic and
+    requantization are left out.
+  \item[on accelerator, on CPU] how those MACs are split, and in how many
+    calls the accelerator is used.
+  \item[scratch memory] the memory needed for intermediate results between
+    layers. Buffers that are not in use at the same time share the same
+    space, so this is the peak, not the sum. Weights are not included.
+\end{description}
+
+The summary is a quick check that the model was mapped as expected. With
+\texttt{--array}, a convolutional model should show all of its MACs on the
+accelerator. Work that is not a multiply-accumulate, such as pooling, adding
+biases and requantization, always runs on the CPU and does not appear in
+these numbers.
+
+\subsection{Calling the generated code}
+
+The generated function takes the input, then every weight and bias array in
+the order the layers appear in the model, and finally the output. It allocates
+nothing and returns nothing; the result is written into the output array.
+
+For the example above, the function has eleven input parameters (the input
+and ten weight and bias arrays) and one output buffer:
+
+\begin{lstlisting}[language=C]
+#include <stdint.h>
+#include "tiny_weights.h"
+
+void tiny(int16_t in[1][1][64][3],
+          int16_t w1[4][1][5][3], int32_t b1[4],
+          int16_t w2[8][1][3][4], int32_t b2[8],
+          int16_t w3[8][1][3][8], int32_t b3[8],
+          int16_t wf1[1][8][8],   int32_t bf1[8],
+          int16_t wf2[1][8][4],   int32_t bf2[4],
+          int16_t out[1][1][4]);
+
+static int16_t input[1][1][64][3];
+static int16_t logits[1][1][4];
+
+int main(void)
+{
+    /* fill input[0][0][t][axis] with sensor data, in Q8.8 */
+
+    tiny(input,
+         (int16_t (*)[1][5][3])tiny_conv1_w, (int32_t *)tiny_conv1_b,
+         (int16_t (*)[1][3][4])tiny_conv2_w, (int32_t *)tiny_conv2_b,
+         (int16_t (*)[1][3][8])tiny_conv3_w, (int32_t *)tiny_conv3_b,
+         (int16_t (*)[8][8])tiny_fc1_w,      (int32_t *)tiny_fc1_b,
+         (int16_t (*)[8][4])tiny_fc2_w,      (int32_t *)tiny_fc2_b,
+         logits);
+
+    /* logits[0][0][i] now holds the score of class i */
+    return 0;
+}
+\end{lstlisting}
+
+The weight arrays are stored flat in \texttt{tiny\_weights.c}, while the
+function expects them with their full shape, so they are cast. The data is not
+copied. The exact prototype for a model can be read from the top of the
+generated \texttt{.c} file.
+
+Input and output are best declared \texttt{static}, as above. On small
+targets the stack is only a few kilobytes, and an input array of a real model
+can be larger than that.
+
+\subsection{Building for the target}
+
+The generated files are added to the firmware sources like any other C file.
+On the PULPissimo targets used in the lab, two sets of compiler flags matter:
+
+\begin{description}
+  \item[No floating-point unit.] The cores have no FPU, but the default
+    \texttt{-march} of the PULP toolchain assumes one and produces
+    instructions the core cannot execute. The program then stops before
+    reaching \texttt{main}. Build with
+    \texttt{-march=rv32imcxpulpv2 -mabi=ilp32}.
+  \item[Compiler bug at \texttt{-O3}.] GCC 7.1.1 stops with an internal error
+    on the generated code at \texttt{-O3}. Build with
+    \texttt{-O2 -fno-tree-vectorize}.
+\end{description}
+
+With \texttt{--array}, the generated code calls the accelerator driver
+through \texttt{systolic\_multiply\_large()}, declared in
+\texttt{systolic\_drv.h}. The driver comes with the
+accelerator, not with ICDeCompiler. The copy in the release package only
+describes the interface the compiler expects; the firmware has to be built
+against the driver from the hardware team. Section~\ref{sec:accel} describes
+this interface.
+
 \end{document}
