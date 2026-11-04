@@ -332,7 +332,8 @@ data.
 \subsection{Generating the C files}
 \label{sec:generate}
 
-\texttt{build\_model.sh} is run from the \texttt{model-tools} directory, with the Python environment activated:
+\texttt{build\_model.sh} is run from the \texttt{model-tools} directory, with
+the Python environment activated:
 
 \begin{lstlisting}[language=bash]
 build_model.sh --int8|--q88 <model> <name> [-o outdir] [--array]
@@ -349,11 +350,12 @@ build_model.sh --int8|--q88 <model> <name> [-o outdir] [--array]
     Without it, everything runs on the CPU.
 \end{description}
 
-For example, the small test model in \texttt{examples/tiny-cnn}, in Q8.8 with the accelerator:
+For example, the small test model in \texttt{examples/tiny-cnn}, in Q8.8 with
+the accelerator:
 
 \begin{lstlisting}[language=bash]
 ./build_model.sh --q88 examples/tiny-cnn/savedmodel_tiny tiny \
-  -o out/ --array
+    -o out/ --array
 \end{lstlisting}
 
 The example model is included in the release package and in the source tree.
@@ -483,12 +485,38 @@ On the PULPissimo targets used in the lab, two sets of compiler flags matter:
     \texttt{-O2 -fno-tree-vectorize}.
 \end{description}
 
-With \texttt{--array}, the generated code calls the accelerator driver
-through \texttt{systolic\_multiply\_large()}, declared in
-\texttt{systolic\_drv.h}. The driver comes with the
-accelerator, not with ICDeCompiler. The copy in the release package only
-describes the interface the compiler expects; the firmware has to be built
-against the driver from the hardware team. Section~\ref{sec:accel} describes
-this interface.
+With \texttt{--array}, the generated code includes \texttt{systolic\_drv.h}
+and calls the accelerator through the driver function
+\texttt{systolic\_multiply\_large()}. The driver comes with the accelerator,
+not with ICDeCompiler. The copy in the release package only describes the
+interface the compiler expects; the firmware has to be built against the
+driver from the hardware team. Section~\ref{sec:accel} describes this
+interface.
 
+\section{Number formats}
+\label{sec:formats}
+
+The cores in the lab's SoC have no floating-point unit, so every model has to run with integers. ICDeCompiler supports two integer formats. They differ in where the model comes from, how numbers are stored, and which hardware can run them.
+
+\subsection{INT8}
+
+INT8 models come from TensorFlow Lite. The model is quantized beforehand with the usual TensorFlow tools, which choose a scale and zero point for every tensor. ICDeCompiler takes these values as they are and does not change them.
+
+Each layer multiplies 8-bit inputs by 8-bit weights and adds the products in a 32-bit accumulator. The result is then brought back to 8 bits with the scale and zero point of the next tensor. This step, called requantization, is expressed in TOSA as \texttt{tosa.rescale} and becomes a short loop in the generated C code.
+
+The arithmetic follows the TFLite reference closely. On the HAR model, the predicted class matches TFLite in 30 of 30 test inputs, and the raw outputs are bit-exact in 24 of 30. The remaining differences are at most one unit and come from rounding exact halves in the global average pooling layer.
+
+\subsection{Q8.8}
+
+Q8.8 models come from an  ordinary float model saved as a TensorFlow SavedModel. No quantization tools are needed.
+
+Every value is a 16-bit integer with 8 fractional bits, so 1.0 is stored as 256 and the smallest step is $1/256$. Weights are converted by multiplying by 256 and rounding. Biases are stored with 16 fractional bits in 32 bits, to match the accumulator. Batch normalization layers are folded into the weights of the convolution before them, so they cost nothing at run time. While converting, \texttt{build\_model.sh} checks that every weight fits in Q8.8 and reports it:
+
+\begin{lstlisting}
+no saturation: every weight fits Q8.8
+\end{lstlisting}
+
+A layer multiplies two Q8.8 values, which gives a result with 16 fractional bits in a 32-bit accumulator. After the bias is added, the result is shifted right by 8 bits to return to Q8.8 Unlike INT8, the scale is the same everywhere, so there are no per-tensor parameters to carry.
+
+On the HAR model, the predicted class matches the float model in 30 of 30 test inputs.
 \end{document}
