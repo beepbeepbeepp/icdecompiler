@@ -519,4 +519,65 @@ no saturation: every weight fits Q8.8
 A layer multiplies two Q8.8 values, which gives a result with 16 fractional bits in a 32-bit accumulator. After the bias is added, the result is shifted right by 8 bits to return to Q8.8 Unlike INT8, the scale is the same everywhere, so there are no per-tensor parameters to carry.
 
 On the HAR model, the predicted class matches the float model in 30 of 30 test inputs.
+
+\subsection{Comparison}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+ & INT8 & Q8.8 \\
+\midrule
+Input model          & quantized \texttt{.tflite}  & float SavedModel \\
+Storage              & \texttt{int8\_t}            & \texttt{int16\_t} \\
+Accumulator          & \texttt{int32\_t}           & \texttt{int32\_t}, Q16.16 \\
+Requantization       & scale and zero point        & shift right by 8 \\
+Value range          & set per tensor              & about $-128$ to $+128$ \\
+Runs on accelerator  & no                          & yes \\
+Compared against     & TFLite                      & float model \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Because Q8.8 stores every value in two bytes and the accelerator path needs
+extra buffers, it uses more memory. For the intermediate results between
+layers:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Model & INT8 & Q8.8 with accelerator \\
+\midrule
+tiny-cnn (476 parameters)   & 773 B     & 2\,506 B \\
+HAR (12\,772 parameters)    & 24\,144 B & 60\,398 B \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Limits of Q8.8}
+
+Q8.8 has a fixed range. Any value larger than about 128 in magnitude does not
+fit, and values smaller than $1/256$ are lost. Most models trained on
+normalized data stay well inside this range, but this has to be checked for
+each new model, not assumed.
+
+Two checks help. \texttt{build\_model.sh} reports whether every weight fits,
+as shown above. For the values computed between layers,
+\texttt{verify\_q88.py} runs the Q8.8 arithmetic on the PC and compares the
+result with the float model, which shows whether the range is a problem.
+
+INT8 does not have this limit in the same way, since each tensor gets its own
+scale, but it needs a quantized model to start from.
+
+\subsection{Which to use}
+
+\begin{itemize}
+  \item The model will run on the CPU only and memory is tight: INT8.
+  \item The model should use the accelerator: Q8.8, since the accelerator
+    takes 16-bit inputs.
+  \item Only a float model is available and there is no time to quantize it:
+    Q8.8.
+\end{itemize}
+
+Running INT8 models on the accelerator is not supported yet.
+
 \end{document}
