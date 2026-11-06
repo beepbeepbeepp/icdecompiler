@@ -155,3 +155,9 @@ im2col materializes the input windows as a matrix, which costs memory: a
 512-long input with a 15-tap kernel becomes a 256×45 buffer.
 
 Buffers share memory only when their element types match.
+
+## License
+
+Apache-2.0, see `LICENSE`. `standalone-opt/`, `standalone-translate/` and the
+scaffolding in `include/` and `lib/` come from the MLIR out-of-tree example in
+llvm-project, licensed Apache-2.0 WITH LLVM-exception.
