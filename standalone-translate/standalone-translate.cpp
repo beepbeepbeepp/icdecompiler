@@ -11,7 +11,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Standalone/StandaloneDialect.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/InitAllTranslations.h"

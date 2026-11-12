@@ -8,8 +8,6 @@
 #ifndef STANDALONE_STANDALONEPASSES_H
 #define STANDALONE_STANDALONEPASSES_H
 
-#include "Standalone/StandaloneDialect.h"
-#include "Standalone/StandaloneOps.h"
 #include "mlir/Pass/Pass.h"
 #include <memory>
 
