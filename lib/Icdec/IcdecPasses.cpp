@@ -47,8 +47,12 @@ namespace mlir::icdec {
 #include "Icdec/IcdecPasses.h.inc"
 
 namespace {
+// Largest inner dimension K the current bitstream takes in one call. Anything
+// wider stays on the CPU.
+static constexpr int64_t kSystolicMaxK = 128;
+
 // Shared rewrite: replace a matmul-like op with a systolic driver call.
-// Returns failure if shapes are not static 8x8.
+// Returns failure if shapes are not static or K exceeds kSystolicMaxK.
 static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, ValueRange outputs, PatternRewriter &rewriter) {
   
   auto aType = dyn_cast<MemRefType>(inputs[0].getType());
@@ -68,8 +72,11 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
   int64_t K = aShape[aType.getRank() - 1];
   int64_t N = bShape[bType.getRank() - 1];
   
-  // the driver tiles internally and pads partial tiles,
-  // so any static M/K/N is acceptable
+// The driver tiles internally and pads partial tiles, so any static M and N
+// work. K is bounded by the bitstream; a wider op stays on the CPU, and the
+// pass reports it once after the rewrite.
+  if (K > kSystolicMaxK)
+    return rewriter.notifyMatchFailure(op, "K exceeds the accelerator limit");
 
   // materialize M, K, N as i32 constants
   auto i32Type = rewriter.getI32Type();
@@ -326,6 +333,24 @@ public:
     FrozenRewritePatternSet patternSet(std::move(patterns));
     if (failed(applyPatternsGreedily(root, patternSet)))
       signalPassFailure();
+
+    // Whatever is still a matmul here was left for the CPU. Say so when the
+    // reason is the K limit: the patterns cannot report it themselves, because
+    // the greedy driver may visit an op more than once.
+    root->walk([&](linalg::LinalgOp op) {
+      if (!linalg::isaContractionOpInterface(op))
+        return;
+      SmallVector<unsigned> redDims;
+      op.getReductionDims(redDims);
+      if (redDims.size() != 1)
+        return;
+      int64_t K = op.getStaticLoopRanges()[redDims[0]];
+      if (ShapedType::isDynamic(K) || K <= kSystolicMaxK)
+        return;
+      op->emitWarning() << "matmul with K = " << K
+                        << " exceeds the accelerator limit of " << kSystolicMaxK
+                        << "; it stays on the CPU";
+    });
 
     // Record how much went to the accelerator, for the summary at the end.
     int64_t offloaded = 0;
@@ -1085,6 +1110,20 @@ public:
     fn.walk([&](linalg::Conv2DNhwcHwcfOp op) { convs.push_back(op); });
 
     for (linalg::Conv2DNhwcHwcfOp op : convs) {
+      // im2col turns the convolution into a matmul with K = KH * KW * C. If
+      // that is more than the accelerator takes, the matmul would stay on the
+      // CPU anyway, so skip the rewrite and save the im2col buffer.
+      auto kernelType = dyn_cast<ShapedType>(op.getInputs()[1].getType());
+      if (kernelType && kernelType.hasStaticShape()) {
+        ArrayRef<int64_t> k = kernelType.getShape(); // KH, KW, C, F
+        int64_t K = k[0] * k[1] * k[2];
+        if (K > kSystolicMaxK) {
+          op->emitWarning() << "convolution needs K = KH*KW*C = " << K
+                            << ", which exceeds the accelerator limit of "
+                            << kSystolicMaxK << "; it stays on the CPU";
+          continue;
+        }
+      }
       rewriter.setInsertionPoint(op);
       FailureOr<std::pair<Operation *, Operation *>> result =
           linalg::rewriteInIm2Col(rewriter, op);

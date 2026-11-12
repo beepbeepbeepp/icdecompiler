@@ -15,7 +15,13 @@
 include "mlir/Pass/PassBase.td"
 
 def MatmulToSystolic : Pass<"icdec-matmul-to-systolic", "::mlir::ModuleOp"> {
-  let summary = "Rewrite tiled 8x8 matmul into systolic array driver call";
+  let summary = "Rewrite matmul into a systolic array driver call";
+  let description = [{
+    Matrix multiplies with static shapes become calls to
+    systolic_multiply_large, which tiles and pads internally. The inner
+    dimension K is limited by the bitstream, 128 at present; a wider matmul is
+    left for the CPU and reported with a warning.
+  }];
   let dependentDialects = ["mlir::emitc::EmitCDialect"];
 }
 

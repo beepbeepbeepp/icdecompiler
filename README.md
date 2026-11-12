@@ -145,8 +145,9 @@ fast.
 
 INT8 models do not reach the accelerator yet; see above.
 
-The driver limits K to 256, so layers with a larger reduction dimension will
-not fit in one accelerator call.
+The current bitstream takes K up to 128 per accelerator call. A matmul with a
+larger reduction dimension, or a convolution whose KH×KW×C is larger, stays on
+the CPU and the compiler prints a warning.
 
 im2col materializes the input windows as a matrix, which costs memory: a
 512-long input with a 15-tap kernel becomes a 256×45 buffer.
