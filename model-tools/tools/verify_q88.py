@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+# Author: Muhammad Faudzan Abdullah
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Compare a Q8.8 C implementation against the float model it came from.
 

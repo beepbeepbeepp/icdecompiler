@@ -1,3 +1,9 @@
+/*
+ * Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+ * Author: Muhammad Faudzan Abdullah
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 /* Host wrapper for the tiny-cnn test model, INT8 by default or Q8.8 with
    -DQ88. Reads the input from stdin and prints the four outputs. */
 

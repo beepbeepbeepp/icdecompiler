@@ -1,4 +1,10 @@
 /*
+ * Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+ * Author: Muhammad Faudzan Abdullah
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
  * expf for RISC-V cores without an FPU.
  *
  * The libm shipped with the PULP toolchain is built with the F extension, so

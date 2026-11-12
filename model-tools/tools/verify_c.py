@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+# Author: Muhammad Faudzan Abdullah
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Compare a C inference implementation against the TFLite interpreter.
 

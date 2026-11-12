@@ -1,3 +1,9 @@
+/*
+ * Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+ * Author: Muhammad Faudzan Abdullah
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 /* Compare the accelerator path against the CPU path for one convolution.
    Both are compiled into this program, so any difference is in the lowering. */
 

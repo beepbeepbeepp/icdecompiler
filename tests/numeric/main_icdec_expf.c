@@ -1,3 +1,9 @@
+/*
+ * Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+ * Author: Muhammad Faudzan Abdullah
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 /* Compare the soft-float expf in runtime/ against the host libm.
    The runtime file is compiled with -Dexpf=icdec_expf so both can coexist. */
 

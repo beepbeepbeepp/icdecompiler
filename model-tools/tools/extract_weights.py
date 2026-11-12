@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+# Author: Muhammad Faudzan Abdullah
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Extract INT8 weights and quantization parameters from a TFLite model
 into C source suitable for bare-metal inference.

@@ -1,3 +1,9 @@
+/*
+ * Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+ * Author: Muhammad Faudzan Abdullah
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 /* Host wrapper for the depthwise + residual test model.
    Reads the int8 input from stdin, prints the four int8 outputs. */
 

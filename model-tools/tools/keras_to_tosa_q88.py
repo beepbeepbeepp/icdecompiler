@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+# Author: Muhammad Faudzan Abdullah
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Generate TOSA MLIR in Q8.8 fixed point from a float model's weights.
 

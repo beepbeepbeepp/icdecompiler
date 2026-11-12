@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+# Author: Muhammad Faudzan Abdullah
+# SPDX-License-Identifier: Apache-2.0
+#
 # ICDeCompiler: lower MLIR (TOSA or linalg) to C.
 # Default target offloads matmul to the systolic array; --cpu keeps everything on CPU.
 set -euo pipefail

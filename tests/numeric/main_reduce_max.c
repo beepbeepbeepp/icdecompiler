@@ -1,3 +1,9 @@
+/*
+ * Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+ * Author: Muhammad Faudzan Abdullah
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 /* reduce_max over axis 1 went through a reinterpret_cast before this was
    fixed, so check the rewritten indexing gives the right numbers. */
 

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+# Author: Muhammad Faudzan Abdullah
+# SPDX-License-Identifier: Apache-2.0
+#
 # Verify generated C compiles against the real systolic driver header.
 # Uses a stub pulp.h so this can run on the host without the PULP SDK.
 set -euo pipefail

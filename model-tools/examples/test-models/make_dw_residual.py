@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+# Author: Muhammad Faudzan Abdullah
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Build a tiny 1D-CNN that uses depthwise convolution and a residual add, then
 quantize it to INT8. Weights are random: this model exists to exercise the

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+# Author: Muhammad Faudzan Abdullah
+# SPDX-License-Identifier: Apache-2.0
+#
 # Verify generated C produces numerically correct results.
 # Uses a host-side stub driver that computes the same matmul in plain C.
 set -euo pipefail

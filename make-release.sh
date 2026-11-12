@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+# Author: Muhammad Faudzan Abdullah
+# SPDX-License-Identifier: Apache-2.0
+#
 # Package the built compiler and model tools so they can be used without
 # building LLVM.
 #

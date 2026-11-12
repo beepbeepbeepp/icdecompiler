@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+# Author: Muhammad Faudzan Abdullah
+# SPDX-License-Identifier: Apache-2.0
+
 """
 A tiny CNN with the same layer layout as the HAR model, only much smaller.
 Weights are random: this model exists to test the toolchain and the boards,

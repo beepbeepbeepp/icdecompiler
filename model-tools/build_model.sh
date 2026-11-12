@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+# Author: Muhammad Faudzan Abdullah
+# SPDX-License-Identifier: Apache-2.0
+#
 # Turn a trained model into C source ready to compile for the target.
 #
 #   ./build_model.sh --int8 model_int8.tflite har -o out/
