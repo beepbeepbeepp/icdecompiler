@@ -17,7 +17,7 @@ OUT="$HERE/icdecompiler-bin-${DATE}.tar.gz"
 
 trap 'rm -rf "$STAGE"' EXIT
 
-for tool in standalone-opt standalone-translate; do
+for tool in icdec-opt icdec-translate; do
     [[ -x "$BUILD/$tool" ]] || { echo "missing $BUILD/$tool; build first" >&2; exit 1; }
 done
 
@@ -25,7 +25,7 @@ mkdir -p "$DIST"
 
 # Stripping drops debug symbols the tools do not need, roughly a quarter of the
 # size.
-for tool in standalone-opt standalone-translate; do
+for tool in icdec-opt icdec-translate; do
     cp "$BUILD/$tool" "$DIST/"
     strip "$DIST/$tool"
 done
@@ -45,8 +45,8 @@ Compiler and model tools, ready to use without building LLVM.
 ## Contents
 
     icdecompiler            compiler driver
-    standalone-opt          MLIR pass pipeline
-    standalone-translate    MLIR to C
+    icdec-opt               MLIR pass pipeline
+    icdec-translate         MLIR to C
     model-tools/            weight extraction, importers, verification
     runtime/                soft-float expf for cores without an FPU
     systolic_drv.h          accelerator driver interface

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20.0)
-project(standalone-dialect LANGUAGES CXX C)
+project(icdecompiler LANGUAGES CXX C)
 
 set(CMAKE_BUILD_WITH_INSTALL_NAME_DIR ON)
 
@@ -30,7 +30,7 @@ else()
   set(EXTERNAL_PROJECT_BUILD TRUE)
   # Build via external projects mechanism
   set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
-  set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/tools/Standalone/lib)
+  set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/tools/Icdec/lib)
 
   set(MLIR_BINARY_DIR ${CMAKE_BINARY_DIR})
   set(MLIR_MAIN_SRC_DIR ${LLVM_MAIN_SRC_DIR}/../mlir)
@@ -42,16 +42,16 @@ else()
   list(APPEND CMAKE_MODULE_PATH "${LLVM_MAIN_SRC_DIR}/cmake/modules")
 endif()
 
-set(STANDALONE_SOURCE_DIR ${PROJECT_SOURCE_DIR})
-set(STANDALONE_BINARY_DIR ${PROJECT_BINARY_DIR})
+set(ICDEC_SOURCE_DIR ${PROJECT_SOURCE_DIR})
+set(ICDEC_BINARY_DIR ${PROJECT_BINARY_DIR})
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${MLIR_INCLUDE_DIRS})
-include_directories(${STANDALONE_SOURCE_DIR}/include)
-include_directories(${STANDALONE_BINARY_DIR}/include)
+include_directories(${ICDEC_SOURCE_DIR}/include)
+include_directories(${ICDEC_BINARY_DIR}/include)
 link_directories(${LLVM_BUILD_LIBRARY_DIR})
 add_definitions(${LLVM_DEFINITIONS})
 
 add_subdirectory(include)
 add_subdirectory(lib)
-add_subdirectory(standalone-opt)
-add_subdirectory(standalone-translate)
+add_subdirectory(icdec-opt)
+add_subdirectory(icdec-translate)

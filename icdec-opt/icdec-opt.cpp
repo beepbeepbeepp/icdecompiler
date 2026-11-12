@@ -1,4 +1,4 @@
-//===- standalone-opt.cpp ---------------------------------------*- C++ -*-===//
+//===- icdec-opt.cpp --------------------------------------------*- C++ -*-===//
 //
 // This file is licensed under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -15,11 +15,11 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/InitAllExtensions.h"
 
-#include "Standalone/StandalonePasses.h"
+#include "Icdec/IcdecPasses.h"
 
 int main(int argc, char **argv) {
   mlir::registerAllPasses();
-  mlir::standalone::registerPasses();
+  mlir::icdec::registerPasses();
 
   mlir::DialectRegistry registry;
   registry.insert<mlir::arith::ArithDialect, mlir::func::FuncDialect>();
@@ -30,5 +30,5 @@ int main(int argc, char **argv) {
   mlir::registerAllExtensions(registry);
 
   return mlir::asMainReturnCode(
-      mlir::MlirOptMain(argc, argv, "Standalone optimizer driver\n", registry));
+      mlir::MlirOptMain(argc, argv, "ICDeCompiler pass driver\n", registry));
 }

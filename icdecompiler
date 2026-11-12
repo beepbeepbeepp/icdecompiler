@@ -6,13 +6,13 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Works both in a built source tree and in a binary package where the tools
 # sit next to this script.
-if [[ -x "$HERE/build/bin/standalone-opt" ]]; then
+if [[ -x "$HERE/build/bin/icdec-opt" ]]; then
   BIN="$HERE/build/bin"
 else
   BIN="$HERE"
 fi
-OPT="$BIN/standalone-opt"
-TRANSLATE="$BIN/standalone-translate"
+OPT="$BIN/icdec-opt"
+TRANSLATE="$BIN/icdec-translate"
 
 usage() {
   cat <<'EOF'

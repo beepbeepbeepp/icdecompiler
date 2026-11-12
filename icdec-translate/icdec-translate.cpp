@@ -1,4 +1,4 @@
-//===- standalone-translate.cpp ---------------------------------*- C++ -*-===//
+//===- icdec-translate.cpp --------------------------------------*- C++ -*-===//
 //
 // This file is licensed under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -21,7 +21,6 @@
 int main(int argc, char **argv) {
   mlir::registerAllTranslations();
 
-  // TODO: Register standalone translations here.
   mlir::TranslateFromMLIRRegistration withdescription(
       "option", "different from option",
       [](mlir::Operation *op, llvm::raw_ostream &output) {

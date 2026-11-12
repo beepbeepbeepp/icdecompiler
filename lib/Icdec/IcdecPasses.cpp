@@ -1,4 +1,4 @@
-//===- StandalonePasses.cpp - Standalone passes -----------------*- C++ -*-===//
+//===- IcdecPasses.cpp - ICDeCompiler passes --------------------*- C++ -*-===//
 //
 // This file is licensed under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -25,9 +25,9 @@
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Conversion/TosaToLinalg/TosaToLinalg.h"
 
-#include "Standalone/StandalonePasses.h"
+#include "Icdec/IcdecPasses.h"
 
-namespace mlir::standalone {
+namespace mlir::icdec {
 #define GEN_PASS_DEF_MATMULTOSYSTOLIC
 #define GEN_PASS_DEF_ICDECCOMPILE
 #define GEN_PASS_DEF_ICDECCOMPILECPU
@@ -41,7 +41,7 @@ namespace mlir::standalone {
 #define GEN_PASS_DEF_VIEWTOEMITC
 #define GEN_PASS_DEF_PRINTSUMMARY
 #define GEN_PASS_DEF_REINTERPRETCASTTOINDEX
-#include "Standalone/StandalonePasses.h.inc"
+#include "Icdec/IcdecPasses.h.inc"
 
 namespace {
 // Shared rewrite: replace a matmul-like op with a systolic driver call.
@@ -1352,4 +1352,4 @@ public:
 };
 
 } // namespace
-} // namespace mlir::standalone
+} // namespace mlir::icdec

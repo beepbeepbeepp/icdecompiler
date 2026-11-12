@@ -1,4 +1,4 @@
-//===- StandalonePasses.td - Standalone dialect passes -------*- tablegen -*-===//
+//===- IcdecPasses.td - ICDeCompiler passes ----------------*- tablegen -*-===//
 //
 // This file is licensed under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,8 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef STANDALONE_PASS
-#define STANDALONE_PASS
+#ifndef ICDEC_PASS
+#define ICDEC_PASS
 
 include "mlir/Pass/PassBase.td"
 
@@ -147,4 +147,4 @@ def ReinterpretCastToIndex : Pass<"icdec-reinterpret-cast-to-index", "::mlir::fu
   let dependentDialects = ["mlir::memref::MemRefDialect", "mlir::arith::ArithDialect", "mlir::scf::SCFDialect"];
 }
 
-#endif // STANDALONE_PASS
+#endif // ICDEC_PASS

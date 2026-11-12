@@ -57,12 +57,9 @@ tests/                numeric, compile and operator-coverage suites
 docs/                 guides
 make-release.sh       packages compiler and tools for distribution
 include/ lib/         compiler passes
-standalone-opt/       MLIR pass pipeline tool
-standalone-translate/ MLIR to C
+icdec-opt/            MLIR pass pipeline tool
+icdec-translate/      MLIR to C
 ```
-
-The `standalone` naming comes from the MLIR out-of-tree template this started
-from.
 
 ## INT8 or Q8.8
 
@@ -158,6 +155,6 @@ Buffers share memory only when their element types match.
 
 ## License
 
-Apache-2.0, see `LICENSE`. `standalone-opt/`, `standalone-translate/` and the
-scaffolding in `include/` and `lib/` come from the MLIR out-of-tree example in
-llvm-project, licensed Apache-2.0 WITH LLVM-exception.
+Apache-2.0, see `LICENSE`. `icdec-opt/`, `icdec-translate/` and the
+scaffolding in `include/` and `lib/` started from the MLIR out-of-tree example
+in llvm-project, licensed Apache-2.0 WITH LLVM-exception.

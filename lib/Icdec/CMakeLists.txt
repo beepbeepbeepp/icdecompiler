@@ -1,11 +1,11 @@
-add_mlir_dialect_library(MLIRStandalone
-        StandalonePasses.cpp
+add_mlir_dialect_library(MLIRIcdec
+        IcdecPasses.cpp
 
         ADDITIONAL_HEADER_DIRS
-        ${PROJECT_SOURCE_DIR}/include/Standalone
+        ${PROJECT_SOURCE_DIR}/include/Icdec
 
         DEPENDS
-        MLIRStandalonePassesIncGen
+        MLIRIcdecPassesIncGen
 
         LINK_LIBS PUBLIC
         MLIRIR
