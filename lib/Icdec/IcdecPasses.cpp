@@ -51,10 +51,20 @@ namespace {
 // wider stays on the CPU.
 static constexpr int64_t kSystolicMaxK = 128;
 
+// The driver is (int16_t *A, int16_t *B, int32_t *Res). Any other element
+// type would be read or written at the wrong width.
+static bool hasSystolicElementTypes(Value a, Value b, Value res) {
+  auto isInt = [](Value v, unsigned width) {
+    auto intTy = dyn_cast<IntegerType>(getElementTypeOrSelf(v.getType()));
+    return intTy && intTy.getWidth() == width;
+  };
+  return isInt(a, 16) && isInt(b, 16) && isInt(res, 32);
+}
+
 // Shared rewrite: replace a matmul-like op with a systolic driver call.
-// Returns failure if shapes are not static or K exceeds kSystolicMaxK.
+// Returns failure if shapes are not static, the element types are not what the
+// driver takes, or K exceeds kSystolicMaxK.
 static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, ValueRange outputs, PatternRewriter &rewriter) {
-  
   auto aType = dyn_cast<MemRefType>(inputs[0].getType());
   auto bType = dyn_cast<MemRefType>(inputs[1].getType());
   if (!aType || !bType)
@@ -62,7 +72,12 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
   if (!aType.hasStaticShape() || !bType.hasStaticShape())
     return failure();
 
-// matmul dims live in the last two axes; leading axes are batch
+  // Other element types stay on the CPU; the pass reports them afterwards.
+  if (!hasSystolicElementTypes(inputs[0], inputs[1], outputs[0]))
+    return rewriter.notifyMatchFailure(
+        op, "accelerator takes i16 inputs and an i32 result");
+
+  // matmul dims live in the last two axes; leading axes are batch
   if (aType.getRank() < 2 || bType.getRank() < 2)
     return failure();
 
@@ -71,10 +86,10 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
   int64_t M = aShape[aType.getRank() - 2];
   int64_t K = aShape[aType.getRank() - 1];
   int64_t N = bShape[bType.getRank() - 1];
-  
-// The driver tiles internally and pads partial tiles, so any static M and N
-// work. K is bounded by the bitstream; a wider op stays on the CPU, and the
-// pass reports it once after the rewrite.
+
+  // The driver tiles internally and pads partial tiles, so any static M and N
+  // work. K is bounded by the bitstream; a wider op stays on the CPU, and the
+  // pass reports it once after the rewrite.
   if (K > kSystolicMaxK)
     return rewriter.notifyMatchFailure(op, "K exceeds the accelerator limit");
 
@@ -334,9 +349,9 @@ public:
     if (failed(applyPatternsGreedily(root, patternSet)))
       signalPassFailure();
 
-    // Whatever is still a matmul here was left for the CPU. Say so when the
-    // reason is the K limit: the patterns cannot report it themselves, because
-    // the greedy driver may visit an op more than once.
+    // Whatever is still a matmul here was left for the CPU. Say why when we
+    // know: the patterns cannot report it themselves, because the greedy driver
+    // may visit an op more than once.
     root->walk([&](linalg::LinalgOp op) {
       if (!linalg::isaContractionOpInterface(op))
         return;
@@ -344,6 +359,12 @@ public:
       op.getReductionDims(redDims);
       if (redDims.size() != 1)
         return;
+      if (!hasSystolicElementTypes(op.getDpsInputs()[0], op.getDpsInputs()[1],
+                                   op.getDpsInits()[0])) {
+        op->emitWarning() << "matmul is not i16 x i16 -> i32, the only element "
+                             "types the accelerator takes; it stays on the CPU";
+        return;
+      }
       int64_t K = op.getStaticLoopRanges()[redDims[0]];
       if (ShapedType::isDynamic(K) || K <= kSystolicMaxK)
         return;
@@ -1110,6 +1131,17 @@ public:
     fn.walk([&](linalg::Conv2DNhwcHwcfOp op) { convs.push_back(op); });
 
     for (linalg::Conv2DNhwcHwcfOp op : convs) {
+      // The matmul that im2col produces only goes to the accelerator as
+      // i16 x i16 -> i32. With other element types the rewrite would just
+      // cost an im2col buffer, so leave the convolution as it is.
+      if (!hasSystolicElementTypes(op.getInputs()[0], op.getInputs()[1],
+                                   op.getOutputs()[0])) {
+        op->emitWarning() << "convolution is not i16 x i16 -> i32, the only "
+                             "element types the accelerator takes; it stays "
+                             "on the CPU";
+        continue;
+      }
+
       // im2col turns the convolution into a matmul with K = KH * KW * C. If
       // that is more than the accelerator takes, the matmul would stay on the
       // CPU anyway, so skip the rewrite and save the im2col buffer.

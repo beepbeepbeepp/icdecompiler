@@ -30,10 +30,11 @@ nm "$TMP/out.o" | grep -q systolic_multiply_large \
   || { echo "FAIL: systolic_multiply_large missing from object" >&2; exit 1; }
 echo "OK: systolic_multiply_large present in object"
 
-# K limit: an op wider than the accelerator takes stays on the CPU with a
-# warning, and the rest of the model still compiles.
-check_k_limit() {
-  local name="$1" want_calls="$2" calls
+# Ops the accelerator cannot take stay on the CPU with a warning, and the rest
+# of the model still compiles. Arguments: input name, accelerator calls
+# expected, text the warning must contain.
+check_stays_on_cpu() {
+  local name="$1" want_calls="$2" warning="$3" calls
   "$ROOT/icdecompiler" "$ROOT/tests/inputs/$name.mlir" -o "$TMP/$name.c" \
     > /dev/null 2> "$TMP/$name.err"
   calls=$(grep -c systolic_multiply_large "$TMP/$name.c" || true)
@@ -41,16 +42,21 @@ check_k_limit() {
     echo "FAIL: $name: $calls accelerator calls, expected $want_calls" >&2
     exit 1
   fi
-  if ! grep -q "exceeds the accelerator limit" "$TMP/$name.err"; then
-    echo "FAIL: $name: no K limit warning" >&2
+  if ! grep -q "$warning" "$TMP/$name.err"; then
+    echo "FAIL: $name: no warning containing '$warning'" >&2
     exit 1
   fi
   if grep -q 'malloc\|free' "$TMP/$name.c"; then
     echo "FAIL: $name: generated C uses malloc or free" >&2
     exit 1
   fi
-  echo "OK: $name keeps the wide op on the CPU and warns"
+  echo "OK: $name stays on the CPU and warns"
 }
 
-check_k_limit matmul_k_limit 1
-check_k_limit conv_k_limit 0
+# K above what the bitstream takes
+check_stays_on_cpu matmul_k_limit 1 "exceeds the accelerator limit"
+check_stays_on_cpu conv_k_limit   0 "exceeds the accelerator limit"
+# element types other than i16 x i16 -> i32
+check_stays_on_cpu matmul_i8      0 "matmul is not i16 x i16 -> i32"
+check_stays_on_cpu conv_i8        0 "convolution is not i16 x i16 -> i32"
+check_stays_on_cpu simple_matmul  0 "matmul is not i16 x i16 -> i32"
