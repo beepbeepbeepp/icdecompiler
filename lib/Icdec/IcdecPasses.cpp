@@ -61,6 +61,18 @@ static bool hasSystolicElementTypes(Value a, Value b, Value res) {
   return isInt(a, 16) && isInt(b, 16) && isInt(res, 32);
 }
 
+// The driver multiplies one M x K matrix by one K x N matrix. Leading axes are
+// batch, and only a batch of one is the same thing as a plain matmul.
+static bool hasUnitBatch(Value v) {
+  auto type = dyn_cast<ShapedType>(v.getType());
+  if (!type || !type.hasRank())
+    return false;
+  if (type.getRank() < 2)
+    return true; // a vector has no batch axis
+  return llvm::all_of(type.getShape().drop_back(2),
+                      [](int64_t d) { return d == 1; });
+}
+
 // Shared rewrite: replace a matmul-like op with a systolic driver call.
 // Returns failure if shapes are not static, the element types are not what the
 // driver takes, or K exceeds kSystolicMaxK.
@@ -76,6 +88,12 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
   if (!hasSystolicElementTypes(inputs[0], inputs[1], outputs[0]))
     return rewriter.notifyMatchFailure(
         op, "accelerator takes i16 inputs and an i32 result");
+
+  // A batch larger than one would need one driver call per batch. That is not
+  // done yet, so it stays on the CPU.
+  if (!hasUnitBatch(inputs[0]) || !hasUnitBatch(inputs[1]) ||
+      !hasUnitBatch(outputs[0]))
+    return rewriter.notifyMatchFailure(op, "batch larger than one");
 
   // matmul dims live in the last two axes; leading axes are batch
   if (aType.getRank() < 2 || bType.getRank() < 2)
@@ -363,6 +381,13 @@ public:
                                    op.getDpsInits()[0])) {
         op->emitWarning() << "matmul is not i16 x i16 -> i32, the only element "
                              "types the accelerator takes; it stays on the CPU";
+        return;
+      }
+      if (!hasUnitBatch(op.getDpsInputs()[0]) ||
+          !hasUnitBatch(op.getDpsInputs()[1]) ||
+          !hasUnitBatch(op.getDpsInits()[0])) {
+        op->emitWarning() << "matmul has a batch larger than one, which the "
+                             "accelerator does not take; it stays on the CPU";
         return;
       }
       int64_t K = op.getStaticLoopRanges()[redDims[0]];
@@ -1139,6 +1164,16 @@ public:
         op->emitWarning() << "convolution is not i16 x i16 -> i32, the only "
                              "element types the accelerator takes; it stays "
                              "on the CPU";
+        continue;
+      }
+
+      // Likewise for a batch larger than one: the accelerator takes a single
+      // matmul, and im2col would produce one per batch.
+      auto inputType = dyn_cast<ShapedType>(op.getInputs()[0].getType());
+      if (inputType && inputType.hasRank() && inputType.getDimSize(0) != 1) {
+        op->emitWarning() << "convolution has a batch larger than one, which "
+                             "the accelerator does not take; it stays on the "
+                             "CPU";
         continue;
       }
 

@@ -60,3 +60,6 @@ check_stays_on_cpu conv_k_limit   0 "exceeds the accelerator limit"
 check_stays_on_cpu matmul_i8      0 "matmul is not i16 x i16 -> i32"
 check_stays_on_cpu conv_i8        0 "convolution is not i16 x i16 -> i32"
 check_stays_on_cpu simple_matmul  0 "matmul is not i16 x i16 -> i32"
+# a batch larger than one
+check_stays_on_cpu matmul_batch2  0 "matmul has a batch larger than one"
+check_stays_on_cpu conv_batch2    0 "convolution has a batch larger than one"
