@@ -18,9 +18,11 @@ def MatmulToSystolic : Pass<"icdec-matmul-to-systolic", "::mlir::ModuleOp"> {
   let summary = "Rewrite matmul into a systolic array driver call";
   let description = [{
     Matrix multiplies with static shapes become calls to
-    systolic_multiply_large, which tiles and pads internally. The inner
-    dimension K is limited by the bitstream, 128 at present; a wider matmul is
-    left for the CPU and reported with a warning.
+    systolic_multiply_large_hwpe, which tiles and pads internally and returns
+    once the result is in place. A failed call makes the model function return
+    the driver's code at once. The inner dimension K is limited by the
+    bitstream, 128 at present; a wider matmul is left for the CPU and reported
+    with a warning.
   }];
   let dependentDialects = ["mlir::emitc::EmitCDialect"];
 }
@@ -68,7 +70,18 @@ def OutParam : Pass<"icdec-out-param", "::mlir::ModuleOp"> {
   let dependentDialects = ["mlir::memref::MemRefDialect"];
 }
 
-def AddIncludes : Pass<"icdec-add-includes", "::mlir::ModuleOp"> {
+def ReturnStatus : Pass<"icdec-return-status", "::mlir::ModuleOp"> {
+  let summary = "Make every model function return a status code";
+  let description = [{
+    A model function returns 0 when it ran to the end and a negative driver
+    code when an accelerator call failed. This pass supplies the return type
+    and the final return; the early exits are added where the driver calls are
+    created. Functions that already return a value are left alone.
+  }];
+  let dependentDialects = ["mlir::emitc::EmitCDialect"];
+}
+
+def AddIncludes: Pass<"icdec-add-includes", "::mlir::ModuleOp"> {
   let summary = "Insert the C headers the generated code needs";
   let description = [{
     Emitted code uses size_t, bool and heap allocation but does not declare the

@@ -28,9 +28,9 @@ INPUT="${1:-$ROOT/tests/inputs/int_matmul.mlir}"
 gcc -S "$TMP/full.c" -I"$ROOT" -I"$HERE/stub-include" -o "$TMP/out.s"
 
 echo "OK: generated C compiles against systolic_drv.h"
-grep -q 'call.*systolic_multiply_large' "$TMP/out.s" \
-  || { echo "FAIL: no call to systolic_multiply_large in the output" >&2; exit 1; }
-echo "OK: generated C calls systolic_multiply_large"
+grep -q 'call.*systolic_multiply_large_hwpe' "$TMP/out.s" \
+  || { echo "FAIL: no call to systolic_multiply_large_hwpe in the output" >&2; exit 1; }
+echo "OK: generated C calls systolic_multiply_large_hwpe"
 
 # Ops the accelerator cannot take stay on the CPU with a warning, and the rest
 # of the model still compiles. Arguments: input name, accelerator calls

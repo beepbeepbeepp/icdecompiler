@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include "har_weights.h"
 
-void har(int16_t input[1][1][512][3],
+int32_t har(int16_t input[1][1][512][3],
                int16_t w1[16][1][15][3], int32_t b1[16],
                int16_t w2[32][1][7][16],  int32_t b2[32],
                int16_t w3[64][1][3][32],  int32_t b3[64],

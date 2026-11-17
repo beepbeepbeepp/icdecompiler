@@ -7,9 +7,10 @@
 /* exp and sigmoid lower to libm calls; check the numbers against libm directly. */
 
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 
-void op(float a[1][8][4], float out[1][8][4]);
+int32_t op(float a[1][8][4], float out[1][8][4]);
 
 int main(void)
 {
@@ -18,7 +19,10 @@ int main(void)
         for (int c = 0; c < 4; c++)
             a[0][i][c] = (float)(i * 4 + c - 16) * 0.25f;
 
-    op(a, out);
+    if (op(a, out) != 0) {
+        printf("FAIL: model returned an error\n");
+        return 1;
+    }
 
     int bad = 0;
     for (int i = 0; i < 8; i++)

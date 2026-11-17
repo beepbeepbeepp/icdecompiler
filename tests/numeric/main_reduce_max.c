@@ -10,7 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-void op(int8_t a[1][8][4], int8_t out[1][1][4]);
+int32_t op(int8_t a[1][8][4], int8_t out[1][1][4]);
 
 int main(void)
 {
@@ -21,7 +21,10 @@ int main(void)
         for (int c = 0; c < 4; c++)
             a[0][i][c] = (int8_t)(((i * 7 + c * 13) % 23) - 11);
 
-    op(a, out);
+    if (op(a, out) != 0) {
+        printf("FAIL: model returned an error\n");
+        return 1;
+    }
 
     int bad = 0;
     for (int c = 0; c < 4; c++) {

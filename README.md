@@ -149,6 +149,10 @@ The current bitstream takes K up to 128 per accelerator call. A matmul with a
 larger reduction dimension, or a convolution whose KH×KW×C is larger, stays on
 the CPU and the compiler prints a warning.
 
+The generated function returns a status: 0 when it ran to the end, or the
+driver's negative code when an accelerator call failed. On a failure it returns
+at once and the output is not valid. With `--cpu` it always returns 0.
+
 im2col materializes the input windows as a matrix, which costs memory: a
 512-long input with a 15-tap kernel becomes a 256×45 buffer.
 

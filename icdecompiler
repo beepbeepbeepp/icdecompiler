@@ -26,7 +26,7 @@ Lower a TOSA (or linalg) MLIR file to C.
 
   -o FILE   write the C code to FILE instead of stdout
   --cpu     keep everything on the CPU (default: matmul goes to the
-            systolic array through systolic_multiply_large)
+            systolic array through the driver in systolic_drv.h)
   -h, --help  show this help
 EOF
 }

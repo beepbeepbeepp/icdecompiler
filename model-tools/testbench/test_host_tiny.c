@@ -19,7 +19,7 @@ typedef int8_t T;
 
 /* Arrays decay to pointers, so this flat prototype matches the generated
    function in both modes. */
-void tiny(T *in,
+int32_t tiny(T *in,
           const T *w1, const int32_t *b1,
           const T *w2, const int32_t *b2,
           const T *w3, const int32_t *b3,

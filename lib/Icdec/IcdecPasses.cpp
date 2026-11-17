@@ -36,6 +36,7 @@ namespace mlir::icdec {
 #define GEN_PASS_DEF_ICDECCOMPILECPU
 #define GEN_PASS_DEF_ELIDECOPYALLOC
 #define GEN_PASS_DEF_OUTPARAM
+#define GEN_PASS_DEF_RETURNSTATUS
 #define GEN_PASS_DEF_ADDINCLUDES
 #define GEN_PASS_DEF_EXPANDINTMINMAX
 #define GEN_PASS_DEF_GLOBALTOEMITC
@@ -50,6 +51,13 @@ namespace {
 // Largest inner dimension K the current bitstream takes in one call. Anything
 // wider stays on the CPU.
 static constexpr int64_t kSystolicMaxK = 128;
+
+// Driver entry point. It returns 0 once the result is in place, or a negative
+// code when the job failed.
+static constexpr StringLiteral kSystolicCallee = "systolic_multiply_large_hwpe";
+
+// Set on functions that return a status code, see ReturnStatus.
+static constexpr StringLiteral kReturnsStatusAttr = "icdec.returns_status";
 
 // The driver is (int16_t *A, int16_t *B, int32_t *Res). Any other element
 // type would be read or written at the wrong width.
@@ -205,17 +213,21 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
     return failure();
   args.push_back(scratchPtr);
 
-  rewriter.create<emitc::CallOpaqueOp>(
-      op->getLoc(),
-      TypeRange{},
-      rewriter.getStringAttr("systolic_multiply_large"),
-      args);
+  // The driver waits for the array itself, so the result is ready on return.
+  Value status = rewriter
+                     .create<emitc::CallOpaqueOp>(
+                         op->getLoc(), TypeRange{i32Type},
+                         rewriter.getStringAttr(kSystolicCallee), args)
+                     .getResult(0);
 
-  // block until the array finishes before anyone reads the result
-  auto timeoutAttr = rewriter.getI32IntegerAttr(10000);
-  Value timeout = rewriter.create<emitc::ConstantOp>(op->getLoc(), i32Type, timeoutAttr);
-  SmallVector<Value> waitArgs{timeout};
-  rewriter.create<emitc::CallOpaqueOp>(op->getLoc(), TypeRange{},rewriter.getStringAttr("systolic_wait_done"),waitArgs);
+  // A failed job leaves garbage in the result, so the model function returns
+  // the driver's code at once. EmitC has no return inside a branch, hence the
+  // verbatim line. Only functions that return a status can do this; in any
+  // other the status is dropped.
+  auto fn = op->getParentOfType<func::FuncOp>();
+  if (fn && fn->hasAttr(kReturnsStatusAttr))
+    rewriter.create<emitc::VerbatimOp>(op->getLoc(), "if ({}) return {};",
+                                       ValueRange{status, status});
 
   // out += scratch
   SmallVector<AffineMap> accMaps(2, rewriter.getMultiDimIdentityMap(cType.getRank()));
@@ -401,7 +413,7 @@ public:
     // Record how much went to the accelerator, for the summary at the end.
     int64_t offloaded = 0;
     root->walk([&](emitc::CallOpaqueOp call) {
-      if (call.getCallee() == "systolic_multiply_large")
+      if (call.getCallee() == kSystolicCallee)
         offloaded++;
     });
     root->setAttr("icdec.offloaded_ops", OpBuilder(&getContext()).getI64IntegerAttr(offloaded));
@@ -438,7 +450,7 @@ public:
     bool usesDriver = false, usesMath = false;
     mod.walk([&](emitc::CallOpaqueOp call) {
       StringRef callee = call.getCallee();
-      if (callee == "systolic_multiply_large")
+      if (callee == kSystolicCallee)
         usesDriver = true;
       if (llvm::is_contained(mathFns, callee))
         usesMath = true;
@@ -507,6 +519,46 @@ public:
 
       SmallVector<Type> argTypes(entry.getArgumentTypes());
       fn.setType(builder.getFunctionType(argTypes, {}));
+    });
+  }
+};
+
+// Every model function returns a status: 0 when it ran to the end, a negative
+// driver code when an accelerator call failed. The early exits are added where
+// the driver calls are created; this pass supplies the return type and the
+// final return.
+class ReturnStatus : public impl::ReturnStatusBase<ReturnStatus> {
+public:
+  using impl::ReturnStatusBase<ReturnStatus>::ReturnStatusBase;
+
+  void runOnOperation() final {
+    ModuleOp mod = getOperation();
+    OpBuilder builder(&getContext());
+    Type statusType = builder.getI32Type();
+
+    // A function called from inside the module keeps its signature, since the
+    // call sites are not rewritten here.
+    llvm::SmallDenseSet<StringRef> called;
+    mod.walk([&](func::CallOp call) { called.insert(call.getCallee()); });
+
+    mod.walk([&](func::FuncOp fn) {
+      if (fn.isExternal() || fn.getFunctionType().getNumResults() != 0 ||
+          called.contains(fn.getSymName()))
+        return;
+
+      SmallVector<func::ReturnOp> returns;
+      fn.walk([&](func::ReturnOp ret) { returns.push_back(ret); });
+      for (func::ReturnOp ret : returns) {
+        builder.setInsertionPoint(ret);
+        Value ok = builder.create<emitc::ConstantOp>(
+            ret.getLoc(), statusType, builder.getI32IntegerAttr(0));
+        builder.create<func::ReturnOp>(ret.getLoc(), ok);
+        ret.erase();
+      }
+
+      fn.setType(builder.getFunctionType(fn.getFunctionType().getInputs(),
+                                         {statusType}));
+      fn->setAttr(kReturnsStatusAttr, builder.getUnitAttr());
     });
   }
 };
@@ -1222,7 +1274,7 @@ public:
     // Accelerator calls carry M, K and N as constants, so the MAC count is
     // just their product.
     mod.walk([&](emitc::CallOpaqueOp call) {
-      if (call.getCallee() != "systolic_multiply_large")
+      if (call.getCallee() != kSystolicCallee)
         return;
       accelCalls++;
 
@@ -1386,6 +1438,7 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addPass(bufferization::createOneShotBufferizePass(bufOpts));
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createOutParam());
+  pm.addPass(createReturnStatus());
 
   if (offloadMatmul) {
     pm.addPass(createMatmulToSystolic());

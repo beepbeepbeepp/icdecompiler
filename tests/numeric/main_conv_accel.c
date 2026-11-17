@@ -10,9 +10,9 @@
 #include <stdint.h>
 #include <stdio.h>
 
-void conv_cpu(int16_t in[1][1][8][2], int16_t w[4][1][3][2], int32_t b[4],
+int32_t conv_cpu(int16_t in[1][1][8][2], int16_t w[4][1][3][2], int32_t b[4],
               int32_t out[1][1][8][4]);
-void conv_acc(int16_t in[1][1][8][2], int16_t w[4][1][3][2], int32_t b[4],
+int32_t conv_acc(int16_t in[1][1][8][2], int16_t w[4][1][3][2], int32_t b[4],
               int32_t out[1][1][8][4]);
 
 int main(void)
@@ -34,8 +34,11 @@ int main(void)
         bias[f] = f * 100;
     }
 
-    conv_cpu(in, w, bias, out_cpu);
-    conv_acc(in, w, bias, out_acc);
+    if (conv_cpu(in, w, bias, out_cpu) != 0 ||
+        conv_acc(in, w, bias, out_acc) != 0) {
+        printf("FAIL: model returned an error\n");
+        return 1;
+    }
 
     int bad = 0;
     for (int i = 0; i < 8; i++)

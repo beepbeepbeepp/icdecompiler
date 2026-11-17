@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include "dw_weights.h"
 
-void dw(int8_t input[1][128][3],
+int32_t dw(int8_t input[1][128][3],
         int8_t w1[8][1][5][3],  int32_t b1[8],
         int8_t wd[1][3][8][1],  int32_t bd[8],
         int8_t w2[8][1][1][8],  int32_t b2[8],
