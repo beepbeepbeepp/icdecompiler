@@ -24,11 +24,12 @@ COMPILER="${ICDECOMPILER:-$HERE/../icdecompiler}"
 
 usage() {
     cat >&2 <<'EOF'
-usage: build_model.sh --int8|--q88 <model> <name> [-o outdir] [--array]
+usage: build_model.sh --int8|--q88 <model> <name> [-o outdir] [--array] [-v]
 
   --int8    quantized .tflite input, INT8 weights
   --q88     float SavedModel input, Q8.8 weights
   --array   offload matmul to the systolic array (default: CPU only)
+  -v        show TensorFlow's start-up messages as well
 EOF
     exit 1
 }
@@ -40,11 +41,13 @@ MODEL="$1"; shift
 NAME="$1"; shift
 OUTDIR="."
 MODE="--cpu"
+VERBOSE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -o)      OUTDIR="$2"; shift 2 ;;
         --array) MODE=""; shift ;;
+        -v)      VERBOSE=1; shift ;;
         *)       echo "unknown option: $1" >&2; usage ;;
     esac
 done
@@ -60,12 +63,26 @@ esac
 
 mkdir -p "$OUTDIR"
 
+# TensorFlow prints start-up notices about GPUs and CPU features on stderr.
+# The tools themselves only write to stdout, so stderr is kept in a log and
+# shown only when a step fails, or always with -v.
+LOG="$OUTDIR/${NAME}.log"
+: > "$LOG"
+run_python() {
+    if [[ $VERBOSE -eq 1 ]]; then
+        python3 "$@"
+    elif ! python3 "$@" 2>> "$LOG"; then
+        cat "$LOG" >&2
+        exit 1
+    fi
+}
+
 echo "==> extracting weights"
-python3 "$TOOLS/$EXTRACT" "$MODEL" -o "$OUTDIR/${NAME}_weights" --prefix "$NAME"
+run_python "$TOOLS/$EXTRACT" "$MODEL" -o "$OUTDIR/${NAME}_weights" --prefix "$NAME"
 
 echo
 echo "==> importing model structure to TOSA"
-python3 "$TOOLS/$IMPORT" "$MODEL" -o "$OUTDIR/${NAME}.mlir" --name "$NAME"
+run_python "$TOOLS/$IMPORT" "$MODEL" -o "$OUTDIR/${NAME}.mlir" --name "$NAME"
 
 echo
 echo "==> compiling to C"
