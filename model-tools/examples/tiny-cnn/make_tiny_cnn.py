@@ -13,7 +13,32 @@ Writes:
   tiny_cnn.keras          the Keras model
   savedmodel_tiny/        float SavedModel, for the Q8.8 path
   tiny_cnn_int8.tflite    INT8 TFLite, for the CPU path
+  make_tiny_cnn.log       what TensorFlow printed along the way
+
+Run with -v to see TensorFlow's messages on the screen instead.
 """
+
+import os
+import sys
+
+# TensorFlow and the TFLite converter report missing GPUs, CPU features and
+# internal steps, some of it from C++ straight to the terminal. None of it
+# matters here, so both output streams go to a log, and this script prints its
+# own lines through `say`. An error brings the terminal back first.
+say = sys.stdout
+if "-v" not in sys.argv:
+    say = os.fdopen(os.dup(1), "w")
+    terminal_err = os.dup(2)
+    log = open("make_tiny_cnn.log", "w")
+    os.dup2(log.fileno(), 1)
+    os.dup2(log.fileno(), 2)
+
+    def report(kind, value, trace):
+        os.dup2(terminal_err, 2)
+        sys.__excepthook__(kind, value, trace)
+        print("TensorFlow's output is in make_tiny_cnn.log", file=sys.stderr)
+
+    sys.excepthook = report
 
 import numpy as np
 import tensorflow as tf
@@ -39,7 +64,7 @@ x = keras.layers.Dense(8, activation="relu", bias_initializer=init_b)(x)
 out = keras.layers.Dense(4, bias_initializer=init_b)(x)
 
 model = keras.Model(inp, out)
-model.summary()
+model.summary(print_fn=lambda line: print(line, file=say))
 
 model.save("tiny_cnn.keras")
 model.export("savedmodel_tiny")
@@ -58,4 +83,4 @@ conv_tfl.inference_input_type = tf.int8
 conv_tfl.inference_output_type = tf.int8
 open("tiny_cnn_int8.tflite", "wb").write(conv_tfl.convert())
 
-print("wrote tiny_cnn.keras, savedmodel_tiny/, tiny_cnn_int8.tflite")
+print("wrote tiny_cnn.keras, savedmodel_tiny/, tiny_cnn_int8.tflite", file=say)
