@@ -53,7 +53,7 @@ Compiler and model tools, ready to use without building LLVM.
     icdec-translate         MLIR to C
     model-tools/            weight extraction, importers, verification
     runtime/                soft-float expf for cores without an FPU
-    systolic_drv.h          accelerator driver interface
+    systolic_drv.h          HWPE driver for the MatMulFIB accelerator
 
 ## Setup
 
@@ -69,8 +69,9 @@ Compiler and model tools, ready to use without building LLVM.
 Produces net.c, net_weights.c, net_weights.h and net.mlir in out/.
 
 In array mode the generated code includes systolic_drv.h. The copy here is the
-interface the compiler targets; use the driver from the hardware team for the
-actual board.
+HWPE driver for the MatMulFIB accelerator on PULPissimo, K up to 128 per call.
+It stages operands in a scratch region at SYSTOLIC_HWPE_TCDM_BASE, 0x1C010000
+unless you define it before the include. Nothing else may live there.
 
 Needs a Linux with a glibc not much older than the machine that built this.
 EOF

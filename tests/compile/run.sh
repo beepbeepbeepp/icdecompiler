@@ -23,12 +23,14 @@ INPUT="${1:-$ROOT/tests/inputs/int_matmul.mlir}"
   cat "$TMP/body.c"
 } > "$TMP/full.c"
 
-gcc -c "$TMP/full.c" -I"$ROOT" -I"$HERE/stub-include" -o "$TMP/out.o"
+# Stop before the assembler: the driver has RISC-V instructions (fence) that a
+# host assembler rejects. Type and prototype checks all happen before that.
+gcc -S "$TMP/full.c" -I"$ROOT" -I"$HERE/stub-include" -o "$TMP/out.s"
 
-echo "OK: generated C compiles and links against systolic_drv.h"
-nm "$TMP/out.o" | grep -q systolic_multiply_large \
-  || { echo "FAIL: systolic_multiply_large missing from object" >&2; exit 1; }
-echo "OK: systolic_multiply_large present in object"
+echo "OK: generated C compiles against systolic_drv.h"
+grep -q 'call.*systolic_multiply_large' "$TMP/out.s" \
+  || { echo "FAIL: no call to systolic_multiply_large in the output" >&2; exit 1; }
+echo "OK: generated C calls systolic_multiply_large"
 
 # Ops the accelerator cannot take stay on the CPU with a warning, and the rest
 # of the model still compiles. Arguments: input name, accelerator calls
