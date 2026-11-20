@@ -97,3 +97,11 @@ if [[ "$left" != 0 ]]; then
   exit 1
 fi
 echo "OK: matmul_late_fail leaves the IR untouched"
+
+# An operand that is a slice of a larger buffer is not M x K elements in a
+# row, which is what the driver reads. It must stay on the CPU, and the model
+# must still compile.
+check_not_offloaded matmul_slice_offset
+check_not_offloaded matmul_slice_stride
+check_not_offloaded matmul_subview_cols
+check_not_offloaded matmul_subview_rows

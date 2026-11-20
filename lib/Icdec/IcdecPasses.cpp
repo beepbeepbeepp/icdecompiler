@@ -81,6 +81,24 @@ static bool hasUnitBatch(Value v) {
                       [](int64_t d) { return d == 1; });
 }
 
+// True if the cast starts at the first element of its source and keeps the
+// elements next to each other in row-major order, so that it changes the shape
+// and nothing else. A cast with an offset or with wider strides is a slice.
+static bool relabelsShapeOnly(memref::ReinterpretCastOp rc) {
+  ArrayRef<int64_t> offsets = rc.getStaticOffsets();
+  ArrayRef<int64_t> sizes = rc.getStaticSizes();
+  ArrayRef<int64_t> strides = rc.getStaticStrides();
+  if (offsets.size() != 1 || offsets[0] != 0 || sizes.size() != strides.size())
+    return false;
+  int64_t contiguous = 1;
+  for (int i = static_cast<int>(sizes.size()) - 1; i >= 0; --i) {
+    if (ShapedType::isDynamic(sizes[i]) || strides[i] != contiguous)
+      return false;
+    contiguous *= sizes[i];
+  }
+  return true;
+}
+
 // Shared rewrite: replace a matmul-like op with a systolic driver call.
 // Returns failure if shapes are not static, the element types are not what the
 // driver takes, K exceeds kSystolicMaxK, or an operand cannot become a C
@@ -145,19 +163,28 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
 
   // The buffer behind an operand, or null if it cannot become a C pointer.
   // This only looks; it creates nothing.
+  //
+  // The driver reads M x K elements in a row from the pointer it is given. An
+  // operand that is a slice of a larger buffer, with an offset or with rows
+  // further apart than K, does not look like that in memory, so it gets no
+  // pointer and the op stays on the CPU, where the loops index it correctly.
   auto bufferOf = [&](Value v) -> Value {
     Value base = unwrap(v);
-    // a reinterpret_cast only relabels the shape; the underlying pointer is
-    // the same, so take the source and skip the cast entirely
-    while (auto rc = base.getDefiningOp<memref::ReinterpretCastOp>())
+    // a reinterpret_cast that only relabels the shape shares its source's
+    // pointer, so take the source and skip the cast
+    while (auto rc = base.getDefiningOp<memref::ReinterpretCastOp>()) {
+      if (!relabelsShapeOnly(rc))
+        return Value();
       base = rc.getSource();
+    }
 
     // already a pointer (e.g from memref.alloc) or a C array
     if (isa<emitc::PointerType, emitc::ArrayType>(base.getType()))
       return base;
     // a memref becomes an equivalent emitc.array, which needs a static shape
+    // and the plain row-major layout; a subview has a strided layout
     if (auto memrefType = dyn_cast<MemRefType>(base.getType()))
-      if (memrefType.hasStaticShape())
+      if (memrefType.hasStaticShape() && memrefType.getLayout().isIdentity())
         return base;
     return Value();
   };
