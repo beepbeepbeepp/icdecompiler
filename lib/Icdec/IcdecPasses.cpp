@@ -83,7 +83,9 @@ static bool hasUnitBatch(Value v) {
 
 // Shared rewrite: replace a matmul-like op with a systolic driver call.
 // Returns failure if shapes are not static, the element types are not what the
-// driver takes, or K exceeds kSystolicMaxK.
+// driver takes, K exceeds kSystolicMaxK, or an operand cannot become a C
+// pointer. Every check runs before the first op is created: a pattern that
+// fails must leave the IR as it found it.
 static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, ValueRange outputs, PatternRewriter &rewriter) {
   auto aType = dyn_cast<MemRefType>(inputs[0].getType());
   auto bType = dyn_cast<MemRefType>(inputs[1].getType());
@@ -119,15 +121,6 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
   if (K > kSystolicMaxK)
     return rewriter.notifyMatchFailure(op, "K exceeds the accelerator limit");
 
-  // materialize M, K, N as i32 constants
-  auto i32Type = rewriter.getI32Type();
-  SmallVector<Value> args;
-  for (int64_t dim : {M, K, N}) {
-    auto attr = rewriter.getI32IntegerAttr(static_cast<int32_t>(dim));
-    args.push_back(rewriter.create<emitc::ConstantOp>(
-        op->getLoc(), i32Type, attr));
-  }
-
   // walk back through casts and shape-only ops to reach the underlying buffer
   auto unwrap = [](Value v) -> Value {
     while (true) {
@@ -150,51 +143,30 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
     return v;
   };
 
-// convert each buffer to a flat C pointer: &arr[0]...[0]
-  auto toPointer = [&](Value v) -> Value {
+  // The buffer behind an operand, or null if it cannot become a C pointer.
+  // This only looks; it creates nothing.
+  auto bufferOf = [&](Value v) -> Value {
     Value base = unwrap(v);
     // a reinterpret_cast only relabels the shape; the underlying pointer is
     // the same, so take the source and skip the cast entirely
     while (auto rc = base.getDefiningOp<memref::ReinterpretCastOp>())
       base = rc.getSource();
 
-    // already a pointer (e.g from memref.alloc): use it directly
-    if (isa<emitc::PointerType>(base.getType()))
+    // already a pointer (e.g from memref.alloc) or a C array
+    if (isa<emitc::PointerType, emitc::ArrayType>(base.getType()))
       return base;
-
-    // if still a memref, cast it to an equivalent emitc.array first
-    if (auto memrefType = dyn_cast<MemRefType>(base.getType())) {
-      if (!memrefType.hasStaticShape())
-        return Value();
-      auto arrTy = emitc::ArrayType::get(memrefType.getShape(), memrefType.getElementType());
-      base = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), arrTy, base).getResult(0);
-    }
-    
-    auto arrType = dyn_cast<emitc::ArrayType>(base.getType());
-    if (!arrType)
-      return Value();
-
-    // build one zero index per array dimension
-    auto indexType = rewriter.getIndexType();
-    auto zeroAttr = rewriter.getIndexAttr(0);
-    Value zero = rewriter.create<emitc::ConstantOp>(
-        op->getLoc(), indexType, zeroAttr);
-    SmallVector<Value> indices(arrType.getRank(), zero);
-
-  auto typedBase = cast<TypedValue<emitc::ArrayType>>(base);
-    Value elem = rewriter.create<emitc::SubscriptOp>(
-        op->getLoc(), typedBase, ValueRange(indices));
-
-    auto ptrType = emitc::PointerType::get(arrType.getElementType());
-    return rewriter.create<emitc::AddressOfOp>(op->getLoc(), ptrType, elem);
+    // a memref becomes an equivalent emitc.array, which needs a static shape
+    if (auto memrefType = dyn_cast<MemRefType>(base.getType()))
+      if (memrefType.hasStaticShape())
+        return base;
+    return Value();
   };
 
-  for (Value v : inputs) {
-    Value p = toPointer(v);
-    if (!p)
-      return failure();
-    args.push_back(p);
-  }
+  Value aBuffer = bufferOf(inputs[0]);
+  Value bBuffer = bufferOf(inputs[1]);
+  if (!aBuffer || !bBuffer)
+    return rewriter.notifyMatchFailure(op, "operand is not a static buffer");
+
   // The driver overwrites its result buffer, but linalg matmul accumulates into
   // its output. Anything already there, a bias for instance, would be lost. So
   // the driver writes into scratch and we add that onto the real output.
@@ -203,15 +175,54 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
   Value cOut = unwrap(outputs[0]);
   auto cType = dyn_cast<MemRefType>(cOut.getType());
   if (!cType || !cType.hasStaticShape())
-    return failure();
+    return rewriter.notifyMatchFailure(op, "output is not a static buffer");
+
+  // Every check has passed. Nothing below this line can fail.
+
+  // materialize M, K, N as i32 constants
+  auto i32Type = rewriter.getI32Type();
+  SmallVector<Value> args;
+  for (int64_t dim : {M, K, N}) {
+    auto attr = rewriter.getI32IntegerAttr(static_cast<int32_t>(dim));
+    args.push_back(rewriter.create<emitc::ConstantOp>(
+        op->getLoc(), i32Type, attr));
+  }
+
+  // convert a buffer from bufferOf to a flat C pointer: &arr[0]...[0]
+  auto toPointer = [&](Value base) -> Value {
+    // already a pointer: use it directly
+    if (isa<emitc::PointerType>(base.getType()))
+      return base;
+
+    // if still a memref, cast it to an equivalent emitc.array first
+    if (auto memrefType = dyn_cast<MemRefType>(base.getType())) {
+      auto arrTy = emitc::ArrayType::get(memrefType.getShape(), memrefType.getElementType());
+      base = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), arrTy, base).getResult(0);
+    }
+
+    auto arrType = cast<emitc::ArrayType>(base.getType());
+
+    // build one zero index per array dimension
+    auto indexType = rewriter.getIndexType();
+    auto zeroAttr = rewriter.getIndexAttr(0);
+    Value zero = rewriter.create<emitc::ConstantOp>(
+        op->getLoc(), indexType, zeroAttr);
+    SmallVector<Value> indices(arrType.getRank(), zero);
+
+    auto typedBase = cast<TypedValue<emitc::ArrayType>>(base);
+    Value elem = rewriter.create<emitc::SubscriptOp>(
+        op->getLoc(), typedBase, ValueRange(indices));
+
+    auto ptrType = emitc::PointerType::get(arrType.getElementType());
+    return rewriter.create<emitc::AddressOfOp>(op->getLoc(), ptrType, elem);
+  };
+
+  args.push_back(toPointer(aBuffer));
+  args.push_back(toPointer(bBuffer));
 
   Value scratch = rewriter.create<memref::AllocOp>(
       op->getLoc(), MemRefType::get(cType.getShape(), cType.getElementType()));
-
-  Value scratchPtr = toPointer(scratch);
-  if (!scratchPtr)
-    return failure();
-  args.push_back(scratchPtr);
+  args.push_back(toPointer(scratch));
 
   // The driver waits for the array itself, so the result is ready on return.
   Value status = rewriter

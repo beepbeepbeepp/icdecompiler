@@ -84,3 +84,16 @@ check_not_offloaded generic_a_transposed
 check_not_offloaded generic_body_square
 check_not_offloaded generic_body_unsigned
 check_not_offloaded generic_body_add_twice
+
+# A rewrite that cannot finish must leave nothing behind. Here the second
+# operand cannot become a C pointer, which the rewrite used to find out only
+# after it had created ops for the first one.
+OPT="$ROOT/build/bin/icdec-opt"
+[[ -x "$OPT" ]] || OPT="$ROOT/icdec-opt"
+left=$("$OPT" "$ROOT/tests/inputs/matmul_late_fail.mlir" \
+         --icdec-matmul-to-systolic 2> /dev/null | grep -c 'emitc\.' || true)
+if [[ "$left" != 0 ]]; then
+  echo "FAIL: matmul_late_fail: a failed rewrite left $left emitc ops behind" >&2
+  exit 1
+fi
+echo "OK: matmul_late_fail leaves the IR untouched"
