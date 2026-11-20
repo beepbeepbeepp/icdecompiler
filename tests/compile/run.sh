@@ -65,3 +65,22 @@ check_stays_on_cpu simple_matmul  0 "matmul is not i16 x i16 -> i32"
 # a batch larger than one
 check_stays_on_cpu matmul_batch2  0 "matmul has a batch larger than one"
 check_stays_on_cpu conv_batch2    0 "convolution has a batch larger than one"
+
+# A linalg.generic that is not a plain signed matmul must not reach the
+# accelerator. Argument: input name.
+check_not_offloaded() {
+  local name="$1" calls
+  "$ROOT/icdecompiler" "$ROOT/tests/inputs/$name.mlir" -o "$TMP/$name.c" \
+    > /dev/null 2> "$TMP/$name.err"
+  calls=$(grep -c systolic_multiply_large "$TMP/$name.c" || true)
+  if [[ "$calls" != 0 ]]; then
+    echo "FAIL: $name: $calls accelerator calls, expected 0" >&2
+    exit 1
+  fi
+  echo "OK: $name is not offloaded"
+}
+
+check_not_offloaded generic_a_transposed
+check_not_offloaded generic_body_square
+check_not_offloaded generic_body_unsigned
+check_not_offloaded generic_body_add_twice

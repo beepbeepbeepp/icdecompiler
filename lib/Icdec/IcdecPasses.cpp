@@ -261,87 +261,73 @@ public:
 
   LogicalResult matchAndRewrite(linalg::GenericOp op,
                                 PatternRewriter &rewriter) const final {
-    // shape check: exactly two inputs and one output
-    if (op.getInputs().size() != 2 || op.getOutputs().size() != 1)
+    // The loops must be those of one matmul: a row loop M, a column loop N,
+    // one reduction K, and nothing else but batch loops. MLIR counts a batch
+    // loop that only A and C carry, which is what im2col produces, among the
+    // M loops, so M itself is read from the output map below.
+    auto dims = linalg::inferContractionDims(op);
+    if (failed(dims) || dims->n.size() != 1 || dims->k.size() != 1)
       return failure();
-
-    // iterator check: must contain a reduction dimension
-    auto iterTypes = op.getIteratorTypesArray();
-    bool hasReduction = llvm::any_of(iterTypes, [](utils::IteratorType t) {
-      return t == utils::IteratorType::reduction;
-    });
-    if (!hasReduction)
+    if (op.getNumLoops() != dims->batch.size() + dims->m.size() + 2)
       return failure();
+    unsigned n = dims->n[0], k = dims->k[0];
 
-    // work out which loop dimension is the reduction, then read the operand
-    // maps to see how M, K and N are laid out
     auto maps = op.getIndexingMapsArray();
-    if (maps.size() != 3)
+    unsigned cRank = maps[2].getNumResults();
+    if (cRank < 2)
+      return failure();
+    auto mExpr = dyn_cast<AffineDimExpr>(maps[2].getResult(cRank - 2));
+    if (!mExpr)
+      return failure();
+    unsigned m = mExpr.getPosition();
+
+    // Each operand must be stored the way the driver reads it: A as M x K,
+    // B as K x N and C as M x N, in the last two axes. Leading axes are batch.
+    // A transposed operand is still a matmul, but not one the driver can take
+    // as it is, so it stays on the CPU.
+    auto endsWith = [](AffineMap map, unsigned row, unsigned col) {
+      unsigned rank = map.getNumResults();
+      if (rank < 2 || !map.isProjectedPermutation())
+        return false;
+      auto r = dyn_cast<AffineDimExpr>(map.getResult(rank - 2));
+      auto c = dyn_cast<AffineDimExpr>(map.getResult(rank - 1));
+      return r && c && r.getPosition() == row && c.getPosition() == col;
+    };
+    if (!endsWith(maps[0], m, k) || !endsWith(maps[1], k, n) ||
+        !endsWith(maps[2], m, n))
       return failure();
 
-    unsigned redDim = 0;
-    bool foundRed = false;
-    for (unsigned i = 0; i < iterTypes.size(); i++)
-      if (iterTypes[i] == utils::IteratorType::reduction) {
-        if (foundRed)
-          return failure();             // more than one reduction
-        redDim = i;
-        foundRed = true;
-      }
-    if (!foundRed)
-      return failure();
-
-    // the output map tells us which dimension is N: its last result
-    AffineMap cMap = maps[2];
-    if (cMap.getNumResults() < 1)
-      return failure();
-    auto nExpr = dyn_cast<AffineDimExpr>(cMap.getResult(cMap.getNumResults() - 1));
-    if (!nExpr)
-      return failure();
-    unsigned nDim = nExpr.getPosition();
-
-    // B must be indexed by exactly N and K; their order tells us whether it is
-    // stored [K, N] as the driver expects, or [N, K] transposed
-    AffineMap bMap = maps[1];
-    if (bMap.getNumResults() != 2)
-      return failure();
-    auto b0 = dyn_cast<AffineDimExpr>(bMap.getResult(0));
-    auto b1 = dyn_cast<AffineDimExpr>(bMap.getResult(1));
-    if (!b0 || !b1)
-      return failure();
-
-    if (b0.getPosition() == nDim && b1.getPosition() == redDim)
-      return failure();                 // transposed B, not handled yet
-    if (!(b0.getPosition() == redDim && b1.getPosition() == nDim))
-      return failure();                 // some other layout entirely
-
-    // body check: a multiply feeding an add, ignoring any widening casts that
-    // integer types need before the multiply
+    // The body must compute acc + a * b on its three arguments. Counting a
+    // multiply and an add is not enough: a * a + acc has both. The driver
+    // multiplies signed integers, so a and b may be widened with a signed
+    // extension but not with an unsigned one.
     Block &body = op.getRegion().front();
-    Operation *mulOp = nullptr, *addOp = nullptr;
-    for (Operation &o : body.without_terminator()) {
-      if (isa<arith::ExtSIOp, arith::ExtUIOp, arith::ExtFOp>(o))
-        continue;                       // widening, not the computation
-      if (isa<arith::MulFOp, arith::MulIOp>(o)) {
-        if (mulOp)
-          return failure();             // more than one multiply
-        mulOp = &o;
-        continue;
-      }
-      if (isa<arith::AddFOp, arith::AddIOp>(o)) {
-        if (addOp)
-          return failure();
-        addOp = &o;
-        continue;
-      }
-      return failure();                 // anything else is not a plain matmul
-    }
-    if (!mulOp || !addOp)
+    Value a = body.getArgument(0);
+    Value b = body.getArgument(1);
+    Value acc = body.getArgument(2);
+
+    auto add = body.getTerminator()->getOperand(0).getDefiningOp<arith::AddIOp>();
+    if (!add)
+      return failure();
+    Value product;
+    if (add.getLhs() == acc)
+      product = add.getRhs();
+    else if (add.getRhs() == acc)
+      product = add.getLhs();
+    else
       return failure();
 
-    // the add must consume the mul result
-    if (addOp->getOperand(0) != mulOp->getResult(0) &&
-        addOp->getOperand(1) != mulOp->getResult(0))
+    auto mul = product.getDefiningOp<arith::MulIOp>();
+    if (!mul)
+      return failure();
+    auto beforeSignExtension = [](Value v) -> Value {
+      if (auto ext = v.getDefiningOp<arith::ExtSIOp>())
+        return ext.getIn();
+      return v;
+    };
+    Value x = beforeSignExtension(mul.getLhs());
+    Value y = beforeSignExtension(mul.getRhs());
+    if (!((x == a && y == b) || (x == b && y == a)))
       return failure();
 
     return rewriteToSystolicCall(op, op.getInputs(), op.getOutputs(), rewriter);
