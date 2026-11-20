@@ -105,3 +105,26 @@ check_not_offloaded matmul_slice_offset
 check_not_offloaded matmul_slice_stride
 check_not_offloaded matmul_subview_cols
 check_not_offloaded matmul_subview_rows
+
+# Input the compiler does not support is refused up front, with a message that
+# says what is wrong. Arguments: input name, text the error must contain.
+check_rejected() {
+  local name="$1" message="$2"
+  if "$ROOT/icdecompiler" "$ROOT/tests/inputs/$name.mlir" -o "$TMP/$name.c" \
+       > /dev/null 2> "$TMP/$name.err"; then
+    echo "FAIL: $name: compiled, expected an error" >&2
+    exit 1
+  fi
+  if ! grep -q "$message" "$TMP/$name.err"; then
+    echo "FAIL: $name: no error containing '$message'" >&2
+    exit 1
+  fi
+  echo "OK: $name is rejected with a clear message"
+}
+
+check_rejected reject_dynamic_shape  "has a dynamic shape"
+check_rejected reject_unranked       "has no rank"
+check_rejected reject_element_type   "element type that is not supported"
+check_rejected reject_call           "calls between functions are not supported"
+check_rejected reject_rank0_constant "rank-0 constant is not supported"
+check_rejected reject_no_function    "no function to compile"

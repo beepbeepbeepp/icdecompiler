@@ -45,6 +45,7 @@ namespace mlir::icdec {
 #define GEN_PASS_DEF_VIEWTOEMITC
 #define GEN_PASS_DEF_PRINTSUMMARY
 #define GEN_PASS_DEF_REINTERPRETCASTTOINDEX
+#define GEN_PASS_DEF_VALIDATEINPUT
 #include "Icdec/IcdecPasses.h.inc"
 
 namespace {
@@ -441,6 +442,105 @@ public:
         offloaded++;
     });
     root->setAttr("icdec.offloaded_ops", OpBuilder(&getContext()).getI64IntegerAttr(offloaded));
+  }
+};
+
+// Rejects input the rest of the pipeline cannot compile, and says what is
+// wrong with it. Without this the same input fails many passes later, with an
+// error about an op the user never wrote.
+class ValidateInput : public impl::ValidateInputBase<ValidateInput> {
+public:
+  using impl::ValidateInputBase<ValidateInput>::ValidateInputBase;
+
+  void runOnOperation() final {
+    ModuleOp mod = getOperation();
+    bool ok = true;
+    bool anyFunction = false;
+
+    for (func::FuncOp fn : mod.getOps<func::FuncOp>()) {
+      if (fn.isExternal())
+        continue;
+      anyFunction = true;
+      if (!checkFunction(fn))
+        ok = false;
+    }
+    // input that is already EmitC has its functions in that dialect
+    if (!mod.getOps<emitc::FuncOp>().empty())
+      anyFunction = true;
+    if (!anyFunction) {
+      mod->emitError() << "no function to compile";
+      ok = false;
+    }
+    if (!ok)
+      signalPassFailure();
+  }
+
+private:
+  // What is wrong with a type, or an empty string if it can be compiled.
+  // Scalars are fine; arrays need an element type that the generated C can
+  // hold. The arguments and results of a function also need a fixed shape,
+  // because they become C arrays. Values inside the function do not: a
+  // dynamic size there can still fold to a constant on the way down.
+  static std::string problemWith(Type type, bool needsFixedShape) {
+    auto shaped = dyn_cast<ShapedType>(type);
+    if (!shaped)
+      return "";
+    if (needsFixedShape && !shaped.hasRank())
+      return "has no rank; every shape must be fixed";
+    if (needsFixedShape && !shaped.hasStaticShape())
+      return "has a dynamic shape; every shape must be fixed";
+
+    Type elem = shaped.getElementType();
+    if (elem.isIndex() || elem.isF32() || elem.isF64())
+      return "";
+    if (auto intTy = dyn_cast<IntegerType>(elem))
+      if (intTy.isSignless() &&
+          llvm::is_contained({1u, 8u, 16u, 32u, 64u}, intTy.getWidth()))
+        return "";
+    return "has an element type that is not supported; use i8, i16, i32, "
+           "i64, f32 or f64";
+  }
+
+  // Reports the first problem in a function, so one mistake gives one error
+  // instead of one per op that touches the same value.
+  static bool checkFunction(func::FuncOp fn) {
+    FunctionType type = fn.getFunctionType();
+    for (auto [i, t] : llvm::enumerate(type.getInputs())) {
+      std::string problem = problemWith(t, /*needsFixedShape=*/true);
+      if (problem.empty())
+        continue;
+      fn.emitError() << "argument " << i << " of '" << fn.getSymName()
+                     << "' has type " << t << ", which " << problem;
+      return false;
+    }
+    for (auto [i, t] : llvm::enumerate(type.getResults())) {
+      std::string problem = problemWith(t, /*needsFixedShape=*/true);
+      if (problem.empty())
+        continue;
+      fn.emitError() << "result " << i << " of '" << fn.getSymName()
+                     << "' has type " << t << ", which " << problem;
+      return false;
+    }
+
+    bool ok = true;
+    fn.walk([&](Operation *op) {
+      if (isa<func::CallOp, func::CallIndirectOp>(op)) {
+        op->emitError() << "calls between functions are not supported; the "
+                           "model must be a single function";
+        ok = false;
+        return WalkResult::interrupt();
+      }
+      for (Type t : op->getResultTypes()) {
+        std::string problem = problemWith(t, /*needsFixedShape=*/false);
+        if (problem.empty())
+          continue;
+        op->emitError() << "produces type " << t << ", which " << problem;
+        ok = false;
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    return ok;
   }
 };
 
@@ -1178,6 +1278,22 @@ public:
     ModuleOp mod = getOperation();
     OpBuilder builder(mod.getContext());
 
+    // A C array needs at least one dimension. A rank-0 constant would have to
+    // become a scalar, with every reader rewritten to match; until that is
+    // done, say so instead of failing an assertion.
+    bool rankZero = false;
+    mod.walk([&](memref::GlobalOp g) {
+      if (g.getType().getRank() != 0)
+        return;
+      g.emitError() << "rank-0 constant is not supported; give it the shape "
+                       "[1]";
+      rankZero = true;
+    });
+    if (rankZero) {
+      signalPassFailure();
+      return;
+    }
+
     // rewrite the readers first, so the declarations are unused when replaced
     SmallVector<memref::GetGlobalOp> readers;
     mod.walk([&](memref::GetGlobalOp g) { readers.push_back(g); });
@@ -1434,6 +1550,9 @@ public:
 
 // Shared pipeline. When `offloadMatmul` is false, everything runs on the CPU.
 static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
+  // Say what is wrong with unsupported input before anything touches it.
+  pm.addPass(createValidateInput());
+
   {
     // HWCF kernel layout turns the im2col result into a plain matmul instead
     // of a row-wise dot product, which is the orientation the driver expects.

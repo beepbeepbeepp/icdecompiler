@@ -146,6 +146,16 @@ def ViewToEmitC : Pass<"icdec-view-to-emitc", "::mlir::ModuleOp"> {
   let dependentDialects = ["mlir::emitc::EmitCDialect"];
 }
 
+def ValidateInput : Pass<"icdec-validate-input", "::mlir::ModuleOp"> {
+  let summary = "Reject input the pipeline cannot compile, with a clear message";
+  let description = [{
+    Runs first. Checks that there is a function to compile, that every shape
+    is ranked and static, that element types are ones the generated C can
+    hold, and that no function calls another. Without it such input fails many
+    passes later, with an error about an op the user never wrote.
+  }];
+}
+
 def PrintSummary : Pass<"icdec-print-summary", "::mlir::ModuleOp"> {
   let summary = "Report what the compiler did with the model";
   let description = [{
