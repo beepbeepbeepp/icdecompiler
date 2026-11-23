@@ -43,6 +43,8 @@ CASE_CFLAGS=-DSIGMOID run_case "$ROOT/tests/ops/sigmoid.mlir" main_exp.c sigmoid
 # second accelerator call times out; the model must stop and return the code
 CASE_CFLAGS=-DSYSTOLIC_STUB_FAIL_CALL=2 \
   run_case "$ROOT/tests/inputs/matmul_two_calls.mlir" main_fail.c fail
+# a temporary that cannot be removed: its source is read while it is written
+run_case "$ROOT/tests/inputs/copy_reads_dest.mlir" main_reverse.c reverse --cpu
 
 # The accelerator path must produce the same numbers as the CPU path, so both
 # are compiled into one program and compared element by element.

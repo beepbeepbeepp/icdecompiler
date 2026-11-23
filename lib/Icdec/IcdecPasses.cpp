@@ -687,8 +687,46 @@ public:
   }
 };
 
+// The op directly in `block` that contains `op`, or null if `op` is not
+// inside that block at all.
+static Operation *ancestorIn(Operation *op, Block *block) {
+  while (op && op->getBlock() != block)
+    op = op->getParentOp();
+  return op;
+}
+
+// True if `value` has a user after `from` and before `to`, which are in the
+// same block. A user nested in a loop counts by where the loop stands. A user
+// outside the block cannot be placed, so it counts as well.
+static bool usedBetween(Value value, Operation *from, Operation *to) {
+  for (Operation *user : value.getUsers()) {
+    if (user == to)
+      continue;
+    Operation *at = ancestorIn(user, to->getBlock());
+    if (!at || (from->isBeforeInBlock(at) && at->isBeforeInBlock(to)))
+      return true;
+  }
+  return false;
+}
+
+// True if `value` has a user after `point`, with the same rules.
+static bool usedAfter(Value value, Operation *point) {
+  for (Operation *user : value.getUsers()) {
+    Operation *at = ancestorIn(user, point->getBlock());
+    if (!at || point->isBeforeInBlock(at))
+      return true;
+  }
+  return false;
+}
+
 // Removes temp buffers that are only written and then copied out wholesale.
 // Redirects the writes straight into the copy destination.
+//
+// The writes then reach the destination earlier than the copy did. That is
+// the same program only if nothing looks at the destination between the
+// alloc and the copy, and nothing reads the temp after the copy. Reversing a
+// buffer through a temp is the case that breaks otherwise: the loop reads
+// the destination while it fills the temp.
 class ElideCopyAlloc : public impl::ElideCopyAllocBase<ElideCopyAlloc> {
 public:
   using impl::ElideCopyAllocBase<ElideCopyAlloc>::ElideCopyAllocBase;
@@ -717,10 +755,32 @@ public:
 
     for (auto [alloc, copy] : work) {
       Value dst = copy.getTarget();
+      // "in between" only has a meaning when both are in one block
+      if (alloc->getBlock() != copy->getBlock() ||
+          !alloc->isBeforeInBlock(copy))
+        continue;
       // the destination must not be produced after the alloc
       if (Operation *def = dst.getDefiningOp())
-        if (!def->isBeforeInBlock(alloc))
+        if (def->getBlock() != alloc->getBlock() ||
+            !def->isBeforeInBlock(alloc))
           continue;
+
+      // Nothing may read or write the destination between the alloc and the
+      // copy. The destination can be a view of a larger buffer, and a use of
+      // that buffer is a use of the destination too, so follow the views down.
+      bool destinationInUse = false;
+      for (Value v = dst; v && !destinationInUse;) {
+        destinationInUse = usedBetween(v, alloc, copy);
+        auto view = v.getDefiningOp<ViewLikeOpInterface>();
+        v = view ? view.getViewSource() : Value();
+      }
+      if (destinationInUse)
+        continue;
+      // After the rewrite the temp and the destination are one buffer, so the
+      // temp must not be read once the copy is past.
+      if (usedAfter(alloc.getResult(), copy))
+        continue;
+
       alloc.getResult().replaceAllUsesWith(dst);
       copy.erase();
       alloc.erase();
