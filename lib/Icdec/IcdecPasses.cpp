@@ -607,6 +607,19 @@ private:
   // Reports the first problem in a function, so one mistake gives one error
   // instead of one per op that touches the same value.
   static bool checkFunction(func::FuncOp fn) {
+    // The arena pass reads buffer lifetimes off the order of ops in one
+    // block, and the C is written as structured loops and ifs. A function
+    // that jumps between blocks fits neither.
+    // Reported at the function's location only: fn.emitError() would print
+    // the whole function after the message.
+    if (!llvm::hasSingleElement(fn.getBody())) {
+      emitError(fn.getLoc())
+          << "'" << fn.getSymName()
+          << "' has more than one block; branches between blocks are not "
+             "supported, use scf.if and scf.for instead";
+      return false;
+    }
+
     FunctionType type = fn.getFunctionType();
     for (auto [i, t] : llvm::enumerate(type.getInputs())) {
       std::string problem = problemWith(t, /*needsFixedShape=*/true);
@@ -1092,6 +1105,19 @@ public:
 
   void runOnOperation() final {
     func::FuncOp fn = getOperation();
+    // a declaration has no body, so no buffers either
+    if (fn.isExternal())
+      return;
+    // A lifetime below is a pair of positions in the entry block. A use in
+    // another block has no position there, and two buffers that are both live
+    // would be given the same bytes. ValidateInput refuses such a function;
+    // this check is for the pass run on its own.
+    if (!llvm::hasSingleElement(fn.getBody())) {
+      emitError(fn.getLoc()) << "'" << fn.getSymName()
+                             << "' has more than one block; buffer lifetimes "
+                                "cannot be worked out";
+      return signalPassFailure();
+    }
     Block *entry = &fn.getBody().front();
 
     struct Slot {

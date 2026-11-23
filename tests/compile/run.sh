@@ -154,6 +154,16 @@ check_rejected reject_element_type   "element type that is not supported"
 check_rejected reject_call           "calls between functions are not supported"
 check_rejected reject_rank0_constant "rank-0 constant is not supported"
 check_rejected reject_no_function    "no function to compile"
+check_rejected reject_branch         "has more than one block"
+
+# A declaration without a body is not code to compile. It used to crash the
+# compiler.
+if ! "$ROOT/icdecompiler" "$ROOT/tests/inputs/unused_declaration.mlir" --cpu \
+     -o "$TMP/unused_declaration.c" > /dev/null 2> "$TMP/unused_declaration.err"; then
+  echo "FAIL: unused_declaration: the compiler stopped on a declaration" >&2
+  exit 1
+fi
+echo "OK: unused_declaration compiles past a declaration without a body"
 
 # The generated C has to declare every function it calls: gcc 14 and later
 # refuse a call to an undeclared function. Arguments: input name, mode.
