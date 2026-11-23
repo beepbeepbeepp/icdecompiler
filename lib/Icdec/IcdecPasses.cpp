@@ -8,6 +8,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
+#include "llvm/ADT/MapVector.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -1116,7 +1117,13 @@ public:
 
     // One arena per element type: mixing types would need byte addressing,
     // which puts us back into pointer casts emitc cannot express.
-    DenseMap<Type, SmallVector<Slot>> byType;
+    //
+    // The arenas are numbered in the order this map is walked. A MapVector
+    // walks in insertion order, which is the order the types first appear in
+    // the function. A DenseMap would walk in an order that depends on where
+    // the types sit in memory, and that changes from run to run: the same
+    // input then gives C that differs in which arena is number 0.
+    llvm::MapVector<Type, SmallVector<Slot>> byType;
     for (Operation &op : *entry) {
       auto alloc = dyn_cast<memref::AllocOp>(&op);
       if (!alloc)

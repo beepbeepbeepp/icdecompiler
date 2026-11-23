@@ -172,3 +172,19 @@ check_declares_calls() {
 
 # a copy that stays in the output becomes a memcpy
 check_declares_calls copy_reads_dest --cpu
+
+# The same input must give the same C every time, byte for byte, or a rebuild
+# shows up as a change in the generated file. This input has buffers of two
+# element types, so two arenas, whose numbering used to vary between runs.
+"$ROOT/icdecompiler" "$ROOT/tests/inputs/conv_q88.mlir" -o "$TMP/same_0.c" \
+  > /dev/null 2>&1
+for run in 1 2 3 4 5 6 7 8 9; do
+  "$ROOT/icdecompiler" "$ROOT/tests/inputs/conv_q88.mlir" -o "$TMP/same_$run.c" \
+    > /dev/null 2>&1
+  if ! cmp -s "$TMP/same_0.c" "$TMP/same_$run.c"; then
+    echo "FAIL: conv_q88: two compilations of the same input differ" >&2
+    diff "$TMP/same_0.c" "$TMP/same_$run.c" | head -4 >&2
+    exit 1
+  fi
+done
+echo "OK: conv_q88 compiles to the same C every time"
