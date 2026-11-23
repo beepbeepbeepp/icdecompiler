@@ -85,6 +85,12 @@ check_not_offloaded generic_body_square
 check_not_offloaded generic_body_unsigned
 check_not_offloaded generic_body_add_twice
 
+# The named ops have the same two ways out of a plain signed matmul: indexing
+# maps that transpose an operand, and a cast that widens it as unsigned.
+check_not_offloaded matmul_named_transposed
+check_not_offloaded matmul_named_unsigned
+check_not_offloaded batch_matmul_named_transposed
+
 # A rewrite that cannot finish must leave nothing behind. Here the second
 # operand cannot become a C pointer, which the rewrite used to find out only
 # after it had created ops for the first one.

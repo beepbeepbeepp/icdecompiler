@@ -283,11 +283,24 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
   return success();
 }
 
+// linalg.matmul and linalg.batch_matmul can carry their own indexing maps,
+// which transpose or broadcast an operand, and a cast attribute, which can
+// widen the inputs as unsigned. The driver reads A as M x K and B as K x N
+// and multiplies signed values, so only the plain form may go to it.
+template <typename MatmulLikeOp>
+static bool isPlainSignedMatmul(MatmulLikeOp op) {
+  return !op.hasUserDefinedMaps() &&
+         op.getCast() == linalg::TypeFn::cast_signed;
+}
+
 class MatmulToSystolicRewriter: public OpRewritePattern<linalg::MatmulOp> {
 public:
   using OpRewritePattern<linalg::MatmulOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(linalg::MatmulOp op, PatternRewriter &rewriter) const final{
+    if (!isPlainSignedMatmul(op))
+      return rewriter.notifyMatchFailure(
+          op, "operand is transposed, broadcast or unsigned");
 
     return rewriteToSystolicCall(op, op.getInputs(), op.getOutputs(), rewriter);
   }
@@ -379,6 +392,10 @@ public:
   using OpRewritePattern<linalg::BatchMatmulOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(linalg::BatchMatmulOp op, PatternRewriter &rewriter) const final {
+    if (!isPlainSignedMatmul(op))
+      return rewriter.notifyMatchFailure(
+          op, "operand is transposed, broadcast or unsigned");
+
     // only single-batch is supported: the driver has no batch concept
     auto aType = dyn_cast<MemRefType>(op.getInputs()[0].getType());
     if (!aType || aType.getRank() != 3 || aType.getShape()[0] != 1)
