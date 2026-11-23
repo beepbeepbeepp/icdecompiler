@@ -156,6 +156,16 @@ def ValidateInput : Pass<"icdec-validate-input", "::mlir::ModuleOp"> {
   }];
 }
 
+def RecordCpuMacs : Pass<"icdec-record-cpu-macs", "::mlir::ModuleOp"> {
+  let summary = "Count the multiply-accumulate work that stays on the CPU";
+  let description = [{
+    Runs just before the remaining linalg ops are lowered to loops. Every op
+    that multiplies and accumulates at that point runs on the CPU, and its
+    loop sizes give the number of multiply-accumulates exactly. The total is
+    stored on the module for the summary.
+  }];
+}
+
 def PrintSummary : Pass<"icdec-print-summary", "::mlir::ModuleOp"> {
   let summary = "Report what the compiler did with the model";
   let description = [{

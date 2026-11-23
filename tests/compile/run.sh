@@ -198,3 +198,28 @@ for run in 1 2 3 4 5 6 7 8 9; do
   fi
 done
 echo "OK: conv_q88 compiles to the same C every time"
+
+# The summary has to agree with the generated code. Arguments: input name,
+# mode, a line the summary must contain (runs of spaces count as one).
+check_summary() {
+  local name="$1" mode="$2" want="$3"
+  "$ROOT/icdecompiler" "$ROOT/tests/inputs/$name.mlir" $mode -o "$TMP/$name.c" \
+    > /dev/null 2> "$TMP/$name.err"
+  if ! tr -s ' ' < "$TMP/$name.err" | grep -qF "$want"; then
+    echo "FAIL: $name: the summary has no line '$want'" >&2
+    sed -n '/ICDeCompiler summary/,$p' "$TMP/$name.err" >&2
+    exit 1
+  fi
+  echo "OK: $name summary has '$want'"
+}
+
+# the same work is counted the same on either side
+check_summary conv_accel ""    "on accelerator : 192 (100%) in 1 calls"
+check_summary conv_accel --cpu "on CPU : 192 (100%)"
+# a multiply-accumulate counts whatever its width
+check_summary matmul_i64 --cpu "MACs total : 24"
+# scratch memory is every static buffer: one outside the arena, 4 x int32_t,
+# and one of bool, a byte each
+check_summary copy_reads_dest --cpu "scratch memory : 16 bytes"
+check_summary bool_buffer     --cpu "scratch memory : 4 bytes"
+

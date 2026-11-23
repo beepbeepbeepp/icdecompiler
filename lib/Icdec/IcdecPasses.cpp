@@ -47,6 +47,7 @@ namespace mlir::icdec {
 #define GEN_PASS_DEF_PRINTSUMMARY
 #define GEN_PASS_DEF_REINTERPRETCASTTOINDEX
 #define GEN_PASS_DEF_VALIDATEINPUT
+#define GEN_PASS_DEF_RECORDCPUMACS
 #include "Icdec/IcdecPasses.h.inc"
 
 namespace {
@@ -60,6 +61,22 @@ static constexpr StringLiteral kSystolicCallee = "systolic_multiply_large_hwpe";
 
 // Set on functions that return a status code, see ReturnStatus.
 static constexpr StringLiteral kReturnsStatusAttr = "icdec.returns_status";
+
+// Module attributes that carry numbers from the pass that knows them to the
+// summary at the end.
+static constexpr StringLiteral kCpuMacsAttr = "icdec.cpu_macs";
+static constexpr StringLiteral kCpuMacsUnknownAttr = "icdec.cpu_macs_unknown";
+// Set on each function: bytes of static buffers the generated C needs.
+static constexpr StringLiteral kScratchBytesAttr = "icdec.scratch_bytes";
+
+// Bytes one element of this type takes in the generated C on the target. An
+// i1 becomes a bool, one byte. An index becomes a size_t, four bytes on the
+// 32-bit core the code is generated for.
+static int64_t bytesPerElement(Type type) {
+  if (type.isIndex())
+    return 4;
+  return (type.getIntOrFloatBitWidth() + 7) / 8;
+}
 
 // The driver is (int16_t *A, int16_t *B, int32_t *Res). Any other element
 // type would be read or written at the wrong width.
@@ -1187,7 +1204,7 @@ public:
     OpBuilder builder(fn.getContext());
     auto mod = fn->getParentOfType<ModuleOp>();
     unsigned arenaIdx = 0;
-    int64_t totalArenaBytes = 0;
+    int64_t scratchBytes = 0;
 
     for (auto &[elemType, slots] : byType) {
       // Place the largest first: it constrains the layout most.
@@ -1225,8 +1242,7 @@ public:
       std::string name =
           ("__icdec_arena" + Twine(arenaIdx++) + "_" + fn.getName()).str();
 
-      unsigned width = elemType.getIntOrFloatBitWidth();
-      totalArenaBytes += arenaElems * (width / 8);
+      scratchBytes += arenaElems * bytesPerElement(elemType);
 
       builder.setInsertionPointToStart(mod.getBody());
       builder.create<memref::GlobalOp>(
@@ -1292,10 +1308,8 @@ public:
       }
     }
 
-    fn->setAttr("icdec.arena_bytes",
-                builder.getI64IntegerAttr(totalArenaBytes));
-
-    // Anything the arena could not take still needs to stay off the heap.
+    // Anything the arena could not take still needs to stay off the heap. It
+    // gets a global of its own, which is scratch memory just the same.
     SmallVector<memref::AllocOp> leftovers;
     fn.walk([&](memref::AllocOp a) {
       if (a.getType().hasStaticShape() && a.getDynamicSizes().empty())
@@ -1318,7 +1332,11 @@ public:
       Value repl = builder.create<memref::GetGlobalOp>(alloc.getLoc(), ty, name);
       alloc.getResult().replaceAllUsesWith(repl);
       alloc.erase();
+
+      scratchBytes += ty.getNumElements() * bytesPerElement(ty.getElementType());
     }
+
+    fn->setAttr(kScratchBytesAttr, builder.getI64IntegerAttr(scratchBytes));
 
     SmallVector<memref::DeallocOp> deadDeallocs;
     fn.walk([&](memref::DeallocOp d) {
@@ -1639,6 +1657,42 @@ public:
   }
 };
 
+// Counts the multiply-accumulate work that is about to be lowered to loops,
+// which is the work that runs on the CPU.
+//
+// It has to be counted here. Once an op is loops, a multiply that accumulates
+// looks the same as one that scales a value during requantisation. Telling
+// them apart by bit width, as the summary used to, left out every 64-bit
+// matmul. As a linalg op the loop sizes are known and the count is exact.
+class RecordCpuMacs : public impl::RecordCpuMacsBase<RecordCpuMacs> {
+public:
+  using impl::RecordCpuMacsBase<RecordCpuMacs>::RecordCpuMacsBase;
+
+  void runOnOperation() final {
+    ModuleOp mod = getOperation();
+    int64_t macs = 0, unknown = 0;
+
+    mod.walk([&](linalg::LinalgOp op) {
+      if (!multipliesAndAccumulates(op))
+        return;
+      // one multiply-accumulate per iteration of the innermost loop
+      int64_t trips = 1;
+      for (int64_t range : op.getStaticLoopRanges()) {
+        if (ShapedType::isDynamic(range)) {
+          unknown++;
+          return;
+        }
+        trips *= range;
+      }
+      macs += trips;
+    });
+
+    OpBuilder builder(&getContext());
+    mod->setAttr(kCpuMacsAttr, builder.getI64IntegerAttr(macs));
+    mod->setAttr(kCpuMacsUnknownAttr, builder.getI64IntegerAttr(unknown));
+  }
+};
+
 // Report what the compiler did, in the spirit of what Vela prints: how much of
 // the multiply-accumulate work went to the accelerator, and how much memory
 // the result needs.
@@ -1646,6 +1700,9 @@ public:
 // Only MACs are counted. Pooling, clamping and requantisation run on the CPU
 // too, but they are element-wise and cheap next to the matrix work, so folding
 // them into the same number would misrepresent where the time goes.
+//
+// Scratch memory is every static buffer the generated C declares for
+// intermediate results: the arenas and the buffers that could not join one.
 class PrintSummary : public impl::PrintSummaryBase<PrintSummary> {
 public:
   using impl::PrintSummaryBase<PrintSummary>::PrintSummaryBase;
@@ -1655,7 +1712,7 @@ public:
 
     int64_t accelCalls = 0, accelMacs = 0;
     int64_t cpuMacs = 0;
-    int64_t arenaBytes = 0, weightBytes = 0;
+    int64_t scratchBytes = 0, weightBytes = 0;
 
     // Accelerator calls carry M, K and N as constants, so the MAC count is
     // just their product.
@@ -1677,61 +1734,17 @@ public:
       accelMacs += dims[0] * dims[1] * dims[2];
     });
 
-    // A multiply inside a loop nest runs once per iteration of every loop
-    // around it. Loops with non-constant bounds are skipped rather than
-    // guessed at.
-    mod.walk([&](Operation *op) {
-      if (!isa<emitc::MulOp>(op))
-        return;
-
-      // Only multiply-accumulates on model data count: a multiply of at most
-      // 32 bits, or a float one, whose result feeds an add. Index arithmetic
-      // is size_t, and requantisation multiplies in 64 bits, so neither is
-      // model work.
-      Type t = op->getResult(0).getType();
-      bool onData = isa<FloatType>(t) ||
-                    (isa<IntegerType>(t) && cast<IntegerType>(t).getWidth() <= 32);
-      // Signed arithmetic is done in unsigned types to keep overflow defined in
-      // C, so the product may pass through a cast or two before the add.
-      std::function<bool(Value, int)> feedsAdd = [&](Value v, int depth) {
-        for (Operation *u : v.getUsers()) {
-          if (isa<emitc::AddOp>(u))
-            return true;
-          if (depth > 0 && isa<emitc::CastOp>(u) &&
-              feedsAdd(u->getResult(0), depth - 1))
-            return true;
-        }
-        return false;
-      };
-      bool accumulates = feedsAdd(op->getResult(0), 3);
-      if (!onData || !accumulates)
-        return;
-
-      int64_t trips = 1;
-      for (Operation *p = op->getParentOp(); p; p = p->getParentOp()) {
-        auto loop = dyn_cast<emitc::ForOp>(p);
-        if (!loop)
-          continue;
-        auto lo = loop.getLowerBound().getDefiningOp<emitc::ConstantOp>();
-        auto hi = loop.getUpperBound().getDefiningOp<emitc::ConstantOp>();
-        auto st = loop.getStep().getDefiningOp<emitc::ConstantOp>();
-        if (!lo || !hi || !st)
-          return;                       // bound we cannot evaluate
-        auto loA = dyn_cast<IntegerAttr>(lo.getValue());
-        auto hiA = dyn_cast<IntegerAttr>(hi.getValue());
-        auto stA = dyn_cast<IntegerAttr>(st.getValue());
-        if (!loA || !hiA || !stA || stA.getInt() == 0)
-          return;
-        int64_t count = (hiA.getInt() - loA.getInt() + stA.getInt() - 1) /
-                        stA.getInt();
-        trips *= (count > 0 ? count : 0);
-      }
-      cpuMacs += trips;
-    });
+    // Work left for the CPU was counted by RecordCpuMacs while it was still
+    // linalg ops with known loop sizes.
+    int64_t cpuUnknown = 0;
+    if (auto attr = mod->getAttrOfType<IntegerAttr>(kCpuMacsAttr))
+      cpuMacs = attr.getInt();
+    if (auto attr = mod->getAttrOfType<IntegerAttr>(kCpuMacsUnknownAttr))
+      cpuUnknown = attr.getInt();
 
     mod.walk([&](Operation *op) {
-      if (auto attr = op->getAttrOfType<IntegerAttr>("icdec.arena_bytes"))
-        arenaBytes += attr.getInt();
+      if (auto attr = op->getAttrOfType<IntegerAttr>(kScratchBytesAttr))
+        scratchBytes += attr.getInt();
     });
 
     mod.walk([&](emitc::GlobalOp g) {
@@ -1743,7 +1756,9 @@ public:
       int64_t elems = 1;
       for (int64_t d : arrTy.getShape())
         elems *= d;
-      weightBytes += elems * (arrTy.getElementType().getIntOrFloatBitWidth() / 8);
+      Type elemTy = arrTy.getElementType();
+      if (elemTy.isIntOrIndexOrFloat())
+        weightBytes += elems * bytesPerElement(elemTy);
     });
 
     int64_t totalMacs = accelMacs + cpuMacs;
@@ -1787,7 +1802,10 @@ public:
       llvm::errs() << "  on CPU            : " << cpuMacs
                    << "  (" << (cpuMacs * 100 / totalMacs) << "%)\n";
     }
-    llvm::errs() << "  scratch memory    : " << arenaBytes << " bytes\n";
+    if (cpuUnknown > 0)
+      llvm::errs() << "  not counted       : " << cpuUnknown
+                   << " ops on the CPU whose loop sizes are not constant\n";
+    llvm::errs() << "  scratch memory    : " << scratchBytes << " bytes\n";
     if (weightBytes)
       llvm::errs() << "  constants in code : " << weightBytes << " bytes\n";
     llvm::errs() << "\n";
@@ -1844,7 +1862,9 @@ static void buildIcdecPipeline(OpPassManager &pm, bool offloadMatmul) {
   pm.addPass(createCanonicalizerPass());
   pm.addPass(memref::createElideReinterpretCastPass());
 
-  // lower everything else to loops
+  // lower everything else to loops; what multiplies and accumulates here is
+  // the CPU's share of the work, so count it first
+  pm.addPass(createRecordCpuMacs());
   pm.addPass(createConvertLinalgToLoopsPass());
   pm.addPass(createLowerAffinePass());
   pm.addNestedPass<func::FuncOp>(arith::createArithExpandOpsPass());
