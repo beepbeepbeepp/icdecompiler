@@ -32,9 +32,10 @@ grep -q 'call.*systolic_multiply_large_hwpe' "$TMP/out.s" \
   || { echo "FAIL: no call to systolic_multiply_large_hwpe in the output" >&2; exit 1; }
 echo "OK: generated C calls systolic_multiply_large_hwpe"
 
-# Ops the accelerator cannot take stay on the CPU with a warning, and the rest
-# of the model still compiles. Arguments: input name, accelerator calls
-# expected, text the warning must contain.
+# Ops the accelerator cannot take stay on the CPU with a warning that says why,
+# and the rest of the model still compiles. No multiply-accumulate may go to
+# the CPU in silence. Arguments: input name, accelerator calls expected, text
+# the warning must contain.
 check_stays_on_cpu() {
   local name="$1" want_calls="$2" warning="$3" calls
   "$ROOT/icdecompiler" "$ROOT/tests/inputs/$name.mlir" -o "$TMP/$name.c" \
@@ -67,29 +68,26 @@ check_stays_on_cpu matmul_batch2  0 "matmul has a batch larger than one"
 check_stays_on_cpu conv_batch2    0 "convolution has a batch larger than one"
 
 # A linalg.generic that is not a plain signed matmul must not reach the
-# accelerator. Argument: input name.
-check_not_offloaded() {
-  local name="$1" calls
-  "$ROOT/icdecompiler" "$ROOT/tests/inputs/$name.mlir" -o "$TMP/$name.c" \
-    > /dev/null 2> "$TMP/$name.err"
-  calls=$(grep -c systolic_multiply_large "$TMP/$name.c" || true)
-  if [[ "$calls" != 0 ]]; then
-    echo "FAIL: $name: $calls accelerator calls, expected 0" >&2
-    exit 1
-  fi
-  echo "OK: $name is not offloaded"
-}
-
-check_not_offloaded generic_a_transposed
-check_not_offloaded generic_body_square
-check_not_offloaded generic_body_unsigned
-check_not_offloaded generic_body_add_twice
+# accelerator.
+check_stays_on_cpu generic_a_transposed   0 "operand stored transposed"
+check_stays_on_cpu generic_body_square    0 "not as acc + a \* b on signed values"
+check_stays_on_cpu generic_body_unsigned  0 "not as acc + a \* b on signed values"
+check_stays_on_cpu generic_body_add_twice 0 "not as acc + a \* b on signed values"
 
 # The named ops have the same two ways out of a plain signed matmul: indexing
 # maps that transpose an operand, and a cast that widens it as unsigned.
-check_not_offloaded matmul_named_transposed
-check_not_offloaded matmul_named_unsigned
-check_not_offloaded batch_matmul_named_transposed
+check_stays_on_cpu matmul_named_transposed       0 "operand stored transposed or broadcast"
+check_stays_on_cpu matmul_named_unsigned         0 "matmul multiplies unsigned values"
+check_stays_on_cpu batch_matmul_named_transposed 0 "operand stored transposed or broadcast"
+
+# other ops that multiply and accumulate but are not a plain matmul
+check_stays_on_cpu matmul_zero_point 0 "matmul has a zero point"
+check_stays_on_cpu matvec            0 "linalg.matvec is not a matrix multiply"
+
+# convolutions that im2col does not turn into a matmul the driver can take
+check_stays_on_cpu conv_zero_point 0 "convolution has a zero point"
+check_stays_on_cpu conv_dilation   0 "convolution has a dilation other than one"
+check_stays_on_cpu conv_depthwise  0 "depthwise convolution is one small matmul"
 
 # A rewrite that cannot finish must leave nothing behind. Here the second
 # operand cannot become a C pointer, which the rewrite used to find out only
@@ -107,10 +105,32 @@ echo "OK: matmul_late_fail leaves the IR untouched"
 # An operand that is a slice of a larger buffer is not M x K elements in a
 # row, which is what the driver reads. It must stay on the CPU, and the model
 # must still compile.
-check_not_offloaded matmul_slice_offset
-check_not_offloaded matmul_slice_stride
-check_not_offloaded matmul_subview_cols
-check_not_offloaded matmul_subview_rows
+check_stays_on_cpu matmul_slice_offset 0 "operand that is a slice of a larger buffer"
+check_stays_on_cpu matmul_slice_stride 0 "operand that is a slice of a larger buffer"
+check_stays_on_cpu matmul_subview_cols 0 "operand that is a slice of a larger buffer"
+check_stays_on_cpu matmul_subview_rows 0 "operand that is a slice of a larger buffer"
+
+# The other way round: work that does go to the accelerator gets no warning.
+# Arguments: input name, accelerator calls expected.
+check_offloaded_quietly() {
+  local name="$1" want_calls="$2" calls
+  "$ROOT/icdecompiler" "$ROOT/tests/inputs/$name.mlir" -o "$TMP/$name.c" \
+    > /dev/null 2> "$TMP/$name.err"
+  calls=$(grep -c 'systolic_multiply_large_hwpe(' "$TMP/$name.c" || true)
+  if [[ "$calls" != "$want_calls" ]]; then
+    echo "FAIL: $name: $calls accelerator calls, expected $want_calls" >&2
+    exit 1
+  fi
+  if grep -q 'warning:' "$TMP/$name.err"; then
+    echo "FAIL: $name: warns although everything is offloaded" >&2
+    grep 'warning:' "$TMP/$name.err" >&2
+    exit 1
+  fi
+  echo "OK: $name is offloaded without a warning"
+}
+
+check_offloaded_quietly int_matmul 1
+check_offloaded_quietly conv_accel 1
 
 # Input the compiler does not support is refused up front, with a message that
 # says what is wrong. Arguments: input name, text the error must contain.

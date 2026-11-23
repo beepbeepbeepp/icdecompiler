@@ -100,110 +100,153 @@ static bool relabelsShapeOnly(memref::ReinterpretCastOp rc) {
   return true;
 }
 
-// Shared rewrite: replace a matmul-like op with a systolic driver call.
-// Returns failure if shapes are not static, the element types are not what the
-// driver takes, K exceeds kSystolicMaxK, or an operand cannot become a C
-// pointer. Every check runs before the first op is created: a pattern that
-// fails must leave the IR as it found it.
-static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, ValueRange outputs, PatternRewriter &rewriter) {
+// True if the body multiplies and adds the product onto something, inside a
+// reduction loop. That is the multiply-accumulate work the accelerator is
+// there for, and the work the summary counts.
+static bool multipliesAndAccumulates(linalg::LinalgOp op) {
+  if (op.getNumReductionLoops() == 0)
+    return false;
+  for (Operation &inner : *op.getBlock()) {
+    if (!isa<arith::MulIOp, arith::MulFOp>(inner))
+      continue;
+    for (Operation *user : inner.getResult(0).getUsers())
+      if (isa<arith::AddIOp, arith::AddFOp>(user))
+        return true;
+  }
+  return false;
+}
+
+// Walks back through casts and shape-only ops to the value they start from.
+static Value throughShapeOps(Value v) {
+  while (true) {
+    if (auto cast = v.getDefiningOp<UnrealizedConversionCastOp>()) {
+      if (cast.getInputs().size() != 1)
+        break;
+      v = cast.getInputs()[0];
+      continue;
+    }
+    if (auto collapse = v.getDefiningOp<memref::CollapseShapeOp>()) {
+      v = collapse.getSrc();
+      continue;
+    }
+    if (auto expand = v.getDefiningOp<memref::ExpandShapeOp>()) {
+      v = expand.getSrc();
+      continue;
+    }
+    break;
+  }
+  return v;
+}
+
+// The buffer behind an operand, or null if it cannot become a C pointer.
+//
+// The driver reads M x K elements in a row from the pointer it is given. An
+// operand that is a slice of a larger buffer, with an offset or with rows
+// further apart than K, does not look like that in memory, so it gets no
+// pointer and the op stays on the CPU, where the loops index it correctly.
+static Value bufferBehind(Value v) {
+  Value base = throughShapeOps(v);
+  // a reinterpret_cast that only relabels the shape shares its source's
+  // pointer, so take the source and skip the cast
+  while (auto rc = base.getDefiningOp<memref::ReinterpretCastOp>()) {
+    if (!relabelsShapeOnly(rc))
+      return Value();
+    base = rc.getSource();
+  }
+
+  // already a pointer (e.g from memref.alloc) or a C array
+  if (isa<emitc::PointerType, emitc::ArrayType>(base.getType()))
+    return base;
+  // a memref becomes an equivalent emitc.array, which needs a static shape
+  // and the plain row-major layout; a subview has a strided layout
+  if (auto memrefType = dyn_cast<MemRefType>(base.getType()))
+    if (memrefType.hasStaticShape() && memrefType.getLayout().isIdentity())
+      return base;
+  return Value();
+}
+
+// What the driver call needs, collected while checking that an op fits.
+struct SystolicOperands {
+  int64_t M = 0, K = 0, N = 0;
+  Value a, b; // the buffers behind the two inputs
+  Value out;  // the buffer the result is added onto
+};
+
+static constexpr StringLiteral kNotSystolicTypes =
+    "matmul is not i16 x i16 -> i32, the only element types the accelerator "
+    "takes";
+
+// Decides whether a matmul with these operands can go to the accelerator.
+// Returns an empty string and fills in `found` if it can. Otherwise returns
+// the reason, worded so that "; it stays on the CPU" can follow it.
+//
+// This only looks at the IR and creates nothing. The rewrite calls it before
+// it builds anything, and the pass calls it again on whatever is left, to tell
+// the user why. One function for both keeps the warning and the decision from
+// drifting apart.
+static std::string whyNotOnSystolic(ValueRange inputs, ValueRange outputs,
+                                    SystolicOperands &found) {
   auto aType = dyn_cast<MemRefType>(inputs[0].getType());
   auto bType = dyn_cast<MemRefType>(inputs[1].getType());
-  if (!aType || !bType)
-    return failure();
-  if (!aType.hasStaticShape() || !bType.hasStaticShape())
-    return failure();
+  if (!aType || !bType || !aType.hasStaticShape() || !bType.hasStaticShape())
+    return "matmul has an operand that is not a buffer with a fixed shape";
 
-  // Other element types stay on the CPU; the pass reports them afterwards.
   if (!hasSystolicElementTypes(inputs[0], inputs[1], outputs[0]))
-    return rewriter.notifyMatchFailure(
-        op, "accelerator takes i16 inputs and an i32 result");
+    return kNotSystolicTypes.str();
 
   // A batch larger than one would need one driver call per batch. That is not
-  // done yet, so it stays on the CPU.
+  // done yet.
   if (!hasUnitBatch(inputs[0]) || !hasUnitBatch(inputs[1]) ||
       !hasUnitBatch(outputs[0]))
-    return rewriter.notifyMatchFailure(op, "batch larger than one");
+    return "matmul has a batch larger than one, which the accelerator does "
+           "not take";
 
   // matmul dims live in the last two axes; leading axes are batch
   if (aType.getRank() < 2 || bType.getRank() < 2)
-    return failure();
-
+    return "matmul has an operand that is not a matrix";
   auto aShape = aType.getShape();
   auto bShape = bType.getShape();
-  int64_t M = aShape[aType.getRank() - 2];
-  int64_t K = aShape[aType.getRank() - 1];
-  int64_t N = bShape[bType.getRank() - 1];
+  found.M = aShape[aType.getRank() - 2];
+  found.K = aShape[aType.getRank() - 1];
+  found.N = bShape[bType.getRank() - 1];
 
   // The driver tiles internally and pads partial tiles, so any static M and N
-  // work. K is bounded by the bitstream; a wider op stays on the CPU, and the
-  // pass reports it once after the rewrite.
-  if (K > kSystolicMaxK)
-    return rewriter.notifyMatchFailure(op, "K exceeds the accelerator limit");
+  // work. K is bounded by the bitstream.
+  if (found.K > kSystolicMaxK)
+    return ("matmul with K = " + Twine(found.K) +
+            " exceeds the accelerator limit of " + Twine(kSystolicMaxK))
+        .str();
 
-  // walk back through casts and shape-only ops to reach the underlying buffer
-  auto unwrap = [](Value v) -> Value {
-    while (true) {
-      if (auto cast = v.getDefiningOp<UnrealizedConversionCastOp>()) {
-        if (cast.getInputs().size() != 1)
-          break;
-        v = cast.getInputs()[0];
-        continue;
-      }
-      if (auto collapse = v.getDefiningOp<memref::CollapseShapeOp>()) {
-        v = collapse.getSrc();
-        continue;
-      }
-      if (auto expand = v.getDefiningOp<memref::ExpandShapeOp>()) {
-        v = expand.getSrc();
-        continue;
-      }
-      break;
-    }
-    return v;
-  };
-
-  // The buffer behind an operand, or null if it cannot become a C pointer.
-  // This only looks; it creates nothing.
-  //
-  // The driver reads M x K elements in a row from the pointer it is given. An
-  // operand that is a slice of a larger buffer, with an offset or with rows
-  // further apart than K, does not look like that in memory, so it gets no
-  // pointer and the op stays on the CPU, where the loops index it correctly.
-  auto bufferOf = [&](Value v) -> Value {
-    Value base = unwrap(v);
-    // a reinterpret_cast that only relabels the shape shares its source's
-    // pointer, so take the source and skip the cast
-    while (auto rc = base.getDefiningOp<memref::ReinterpretCastOp>()) {
-      if (!relabelsShapeOnly(rc))
-        return Value();
-      base = rc.getSource();
-    }
-
-    // already a pointer (e.g from memref.alloc) or a C array
-    if (isa<emitc::PointerType, emitc::ArrayType>(base.getType()))
-      return base;
-    // a memref becomes an equivalent emitc.array, which needs a static shape
-    // and the plain row-major layout; a subview has a strided layout
-    if (auto memrefType = dyn_cast<MemRefType>(base.getType()))
-      if (memrefType.hasStaticShape() && memrefType.getLayout().isIdentity())
-        return base;
-    return Value();
-  };
-
-  Value aBuffer = bufferOf(inputs[0]);
-  Value bBuffer = bufferOf(inputs[1]);
-  if (!aBuffer || !bBuffer)
-    return rewriter.notifyMatchFailure(op, "operand is not a static buffer");
+  found.a = bufferBehind(inputs[0]);
+  found.b = bufferBehind(inputs[1]);
+  if (!found.a || !found.b)
+    return "matmul has an operand that is a slice of a larger buffer, which "
+           "the driver cannot read";
 
   // The driver overwrites its result buffer, but linalg matmul accumulates into
   // its output. Anything already there, a bias for instance, would be lost. So
   // the driver writes into scratch and we add that onto the real output.
   // Write the accumulation into whatever the output collapses from, so the
   // collapse has no remaining user and folds away.
-  Value cOut = unwrap(outputs[0]);
-  auto cType = dyn_cast<MemRefType>(cOut.getType());
+  found.out = throughShapeOps(outputs[0]);
+  auto cType = dyn_cast<MemRefType>(found.out.getType());
   if (!cType || !cType.hasStaticShape())
-    return rewriter.notifyMatchFailure(op, "output is not a static buffer");
+    return "matmul has an output that is not a buffer with a fixed shape";
+
+  return "";
+}
+
+// Shared rewrite: replace a matmul-like op with a systolic driver call, or
+// fail if whyNotOnSystolic has a reason. Every check runs before the first op
+// is created: a pattern that fails must leave the IR as it found it.
+static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, ValueRange outputs, PatternRewriter &rewriter) {
+  SystolicOperands found;
+  std::string why = whyNotOnSystolic(inputs, outputs, found);
+  if (!why.empty())
+    return rewriter.notifyMatchFailure(op, why);
+  int64_t M = found.M, K = found.K, N = found.N;
+  Value aBuffer = found.a, bBuffer = found.b, cOut = found.out;
+  auto cType = cast<MemRefType>(cOut.getType());
 
   // Every check has passed. Nothing below this line can fail.
 
@@ -286,11 +329,17 @@ static LogicalResult rewriteToSystolicCall(Operation *op, ValueRange inputs, Val
 // linalg.matmul and linalg.batch_matmul can carry their own indexing maps,
 // which transpose or broadcast an operand, and a cast attribute, which can
 // widen the inputs as unsigned. The driver reads A as M x K and B as K x N
-// and multiplies signed values, so only the plain form may go to it.
+// and multiplies signed values, so only the plain form may go to it. Returns
+// the reason this one may not, or an empty string.
 template <typename MatmulLikeOp>
-static bool isPlainSignedMatmul(MatmulLikeOp op) {
-  return !op.hasUserDefinedMaps() &&
-         op.getCast() == linalg::TypeFn::cast_signed;
+static std::string whyNotPlainNamedMatmul(MatmulLikeOp op) {
+  if (op.hasUserDefinedMaps())
+    return "matmul has an operand stored transposed or broadcast, which the "
+           "driver cannot read";
+  if (op.getCast() != linalg::TypeFn::cast_signed)
+    return "matmul multiplies unsigned values, and the accelerator multiplies "
+           "signed ones";
+  return "";
 }
 
 class MatmulToSystolicRewriter: public OpRewritePattern<linalg::MatmulOp> {
@@ -298,13 +347,102 @@ public:
   using OpRewritePattern<linalg::MatmulOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(linalg::MatmulOp op, PatternRewriter &rewriter) const final{
-    if (!isPlainSignedMatmul(op))
-      return rewriter.notifyMatchFailure(
-          op, "operand is transposed, broadcast or unsigned");
+    std::string why = whyNotPlainNamedMatmul(op);
+    if (!why.empty())
+      return rewriter.notifyMatchFailure(op, why);
 
     return rewriteToSystolicCall(op, op.getInputs(), op.getOutputs(), rewriter);
   }
 };
+
+// Why a linalg.generic that multiplies and accumulates is not a matmul the
+// driver can take, or an empty string if it is one.
+static std::string whyNotPlainGenericMatmul(linalg::GenericOp op) {
+  static constexpr StringLiteral notMatmulLoops =
+      "linalg.generic multiplies and accumulates, but its loops are not those "
+      "of a matrix multiply";
+
+  // The loops must be those of one matmul: a row loop M, a column loop N,
+  // one reduction K, and nothing else but batch loops. MLIR counts a batch
+  // loop that only A and C carry, which is what im2col produces, among the
+  // M loops, so M itself is read from the output map below.
+  auto dims = linalg::inferContractionDims(op);
+  if (failed(dims) || dims->n.size() != 1 || dims->k.size() != 1)
+    return notMatmulLoops.str();
+  if (op.getNumLoops() != dims->batch.size() + dims->m.size() + 2)
+    return notMatmulLoops.str();
+  unsigned n = dims->n[0], k = dims->k[0];
+
+  // Report the wrong element types before anything about the layout: a float
+  // matmul is first of all a float matmul.
+  if (!hasSystolicElementTypes(op.getInputs()[0], op.getInputs()[1],
+                               op.getOutputs()[0]))
+    return kNotSystolicTypes.str();
+
+  auto maps = op.getIndexingMapsArray();
+  unsigned cRank = maps[2].getNumResults();
+  if (cRank < 2)
+    return notMatmulLoops.str();
+  auto mExpr = dyn_cast<AffineDimExpr>(maps[2].getResult(cRank - 2));
+  if (!mExpr)
+    return notMatmulLoops.str();
+  unsigned m = mExpr.getPosition();
+
+  // Each operand must be stored the way the driver reads it: A as M x K,
+  // B as K x N and C as M x N, in the last two axes. Leading axes are batch.
+  // A transposed operand is still a matmul, but not one the driver can take
+  // as it is.
+  auto endsWith = [](AffineMap map, unsigned row, unsigned col) {
+    unsigned rank = map.getNumResults();
+    if (rank < 2 || !map.isProjectedPermutation())
+      return false;
+    auto r = dyn_cast<AffineDimExpr>(map.getResult(rank - 2));
+    auto c = dyn_cast<AffineDimExpr>(map.getResult(rank - 1));
+    return r && c && r.getPosition() == row && c.getPosition() == col;
+  };
+  if (!endsWith(maps[0], m, k) || !endsWith(maps[1], k, n) ||
+      !endsWith(maps[2], m, n))
+    return "matmul has an operand stored transposed, which the driver cannot "
+           "read";
+
+  // The body must compute acc + a * b on its three arguments. Counting a
+  // multiply and an add is not enough: a * a + acc has both. The driver
+  // multiplies signed integers, so a and b may be widened with a signed
+  // extension but not with an unsigned one.
+  static constexpr StringLiteral notSignedProduct =
+      "linalg.generic multiplies and accumulates, but not as acc + a * b on "
+      "signed values";
+  Block &body = op.getRegion().front();
+  Value a = body.getArgument(0);
+  Value b = body.getArgument(1);
+  Value acc = body.getArgument(2);
+
+  auto add = body.getTerminator()->getOperand(0).getDefiningOp<arith::AddIOp>();
+  if (!add)
+    return notSignedProduct.str();
+  Value product;
+  if (add.getLhs() == acc)
+    product = add.getRhs();
+  else if (add.getRhs() == acc)
+    product = add.getLhs();
+  else
+    return notSignedProduct.str();
+
+  auto mul = product.getDefiningOp<arith::MulIOp>();
+  if (!mul)
+    return notSignedProduct.str();
+  auto beforeSignExtension = [](Value v) -> Value {
+    if (auto ext = v.getDefiningOp<arith::ExtSIOp>())
+      return ext.getIn();
+    return v;
+  };
+  Value x = beforeSignExtension(mul.getLhs());
+  Value y = beforeSignExtension(mul.getRhs());
+  if (!((x == a && y == b) || (x == b && y == a)))
+    return notSignedProduct.str();
+
+  return "";
+}
 
 class GenericMatmulToSystolicRewriter
     : public OpRewritePattern<linalg::GenericOp> {
@@ -313,74 +451,9 @@ public:
 
   LogicalResult matchAndRewrite(linalg::GenericOp op,
                                 PatternRewriter &rewriter) const final {
-    // The loops must be those of one matmul: a row loop M, a column loop N,
-    // one reduction K, and nothing else but batch loops. MLIR counts a batch
-    // loop that only A and C carry, which is what im2col produces, among the
-    // M loops, so M itself is read from the output map below.
-    auto dims = linalg::inferContractionDims(op);
-    if (failed(dims) || dims->n.size() != 1 || dims->k.size() != 1)
-      return failure();
-    if (op.getNumLoops() != dims->batch.size() + dims->m.size() + 2)
-      return failure();
-    unsigned n = dims->n[0], k = dims->k[0];
-
-    auto maps = op.getIndexingMapsArray();
-    unsigned cRank = maps[2].getNumResults();
-    if (cRank < 2)
-      return failure();
-    auto mExpr = dyn_cast<AffineDimExpr>(maps[2].getResult(cRank - 2));
-    if (!mExpr)
-      return failure();
-    unsigned m = mExpr.getPosition();
-
-    // Each operand must be stored the way the driver reads it: A as M x K,
-    // B as K x N and C as M x N, in the last two axes. Leading axes are batch.
-    // A transposed operand is still a matmul, but not one the driver can take
-    // as it is, so it stays on the CPU.
-    auto endsWith = [](AffineMap map, unsigned row, unsigned col) {
-      unsigned rank = map.getNumResults();
-      if (rank < 2 || !map.isProjectedPermutation())
-        return false;
-      auto r = dyn_cast<AffineDimExpr>(map.getResult(rank - 2));
-      auto c = dyn_cast<AffineDimExpr>(map.getResult(rank - 1));
-      return r && c && r.getPosition() == row && c.getPosition() == col;
-    };
-    if (!endsWith(maps[0], m, k) || !endsWith(maps[1], k, n) ||
-        !endsWith(maps[2], m, n))
-      return failure();
-
-    // The body must compute acc + a * b on its three arguments. Counting a
-    // multiply and an add is not enough: a * a + acc has both. The driver
-    // multiplies signed integers, so a and b may be widened with a signed
-    // extension but not with an unsigned one.
-    Block &body = op.getRegion().front();
-    Value a = body.getArgument(0);
-    Value b = body.getArgument(1);
-    Value acc = body.getArgument(2);
-
-    auto add = body.getTerminator()->getOperand(0).getDefiningOp<arith::AddIOp>();
-    if (!add)
-      return failure();
-    Value product;
-    if (add.getLhs() == acc)
-      product = add.getRhs();
-    else if (add.getRhs() == acc)
-      product = add.getLhs();
-    else
-      return failure();
-
-    auto mul = product.getDefiningOp<arith::MulIOp>();
-    if (!mul)
-      return failure();
-    auto beforeSignExtension = [](Value v) -> Value {
-      if (auto ext = v.getDefiningOp<arith::ExtSIOp>())
-        return ext.getIn();
-      return v;
-    };
-    Value x = beforeSignExtension(mul.getLhs());
-    Value y = beforeSignExtension(mul.getRhs());
-    if (!((x == a && y == b) || (x == b && y == a)))
-      return failure();
+    std::string why = whyNotPlainGenericMatmul(op);
+    if (!why.empty())
+      return rewriter.notifyMatchFailure(op, why);
 
     return rewriteToSystolicCall(op, op.getInputs(), op.getOutputs(), rewriter);
   }
@@ -392,9 +465,9 @@ public:
   using OpRewritePattern<linalg::BatchMatmulOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(linalg::BatchMatmulOp op, PatternRewriter &rewriter) const final {
-    if (!isPlainSignedMatmul(op))
-      return rewriter.notifyMatchFailure(
-          op, "operand is transposed, broadcast or unsigned");
+    std::string why = whyNotPlainNamedMatmul(op);
+    if (!why.empty())
+      return rewriter.notifyMatchFailure(op, why);
 
     // only single-batch is supported: the driver has no batch concept
     auto aType = dyn_cast<MemRefType>(op.getInputs()[0].getType());
@@ -404,6 +477,37 @@ public:
     return rewriteToSystolicCall(op, op.getInputs(), op.getOutputs(), rewriter);
   }
 };
+
+// Why a multiply-accumulate that is still in the IR after the rewrite was left
+// for the CPU. Never empty.
+static std::string whyLeftOnCpu(linalg::LinalgOp op) {
+  Operation *raw = op.getOperation();
+  SystolicOperands unused;
+  std::string why;
+  if (auto generic = dyn_cast<linalg::GenericOp>(raw)) {
+    why = whyNotPlainGenericMatmul(generic);
+    if (why.empty())
+      why = whyNotOnSystolic(generic.getInputs(), generic.getOutputs(), unused);
+  } else if (auto matmul = dyn_cast<linalg::MatmulOp>(raw)) {
+    why = whyNotPlainNamedMatmul(matmul);
+    if (why.empty())
+      why = whyNotOnSystolic(matmul.getInputs(), matmul.getOutputs(), unused);
+  } else if (auto batch = dyn_cast<linalg::BatchMatmulOp>(raw)) {
+    why = whyNotPlainNamedMatmul(batch);
+    if (why.empty())
+      why = whyNotOnSystolic(batch.getInputs(), batch.getOutputs(), unused);
+  } else if (isa<linalg::QuantizedMatmulOp, linalg::QuantizedBatchMatmulOp>(
+                 raw)) {
+    why = "matmul has a zero point, which the accelerator does not subtract";
+  } else {
+    why = (raw->getName().getStringRef() +
+           " is not a matrix multiply the accelerator takes")
+              .str();
+  }
+  if (why.empty())
+    why = "matmul was not sent to the accelerator";
+  return why;
+}
 
 class MatmulToSystolic
     : public impl::MatmulToSystolicBase<MatmulToSystolic> {
@@ -421,35 +525,16 @@ public:
     if (failed(applyPatternsGreedily(root, patternSet)))
       signalPassFailure();
 
-    // Whatever is still a matmul here was left for the CPU. Say why when we
-    // know: the patterns cannot report it themselves, because the greedy driver
-    // may visit an op more than once.
+    // Whatever still multiplies and accumulates here was left for the CPU.
+    // Every such op gets one warning that says why. The patterns cannot report
+    // it themselves, because the greedy driver may visit an op more than once.
     root->walk([&](linalg::LinalgOp op) {
-      if (!linalg::isaContractionOpInterface(op))
+      if (!multipliesAndAccumulates(op))
         return;
-      SmallVector<unsigned> redDims;
-      op.getReductionDims(redDims);
-      if (redDims.size() != 1)
+      // ConvToIm2Col has already said why a convolution was left as it is
+      if (linalg::isaConvolutionOpInterface(op))
         return;
-      if (!hasSystolicElementTypes(op.getDpsInputs()[0], op.getDpsInputs()[1],
-                                   op.getDpsInits()[0])) {
-        op->emitWarning() << "matmul is not i16 x i16 -> i32, the only element "
-                             "types the accelerator takes; it stays on the CPU";
-        return;
-      }
-      if (!hasUnitBatch(op.getDpsInputs()[0]) ||
-          !hasUnitBatch(op.getDpsInputs()[1]) ||
-          !hasUnitBatch(op.getDpsInits()[0])) {
-        op->emitWarning() << "matmul has a batch larger than one, which the "
-                             "accelerator does not take; it stays on the CPU";
-        return;
-      }
-      int64_t K = op.getStaticLoopRanges()[redDims[0]];
-      if (ShapedType::isDynamic(K) || K <= kSystolicMaxK)
-        return;
-      op->emitWarning() << "matmul with K = " << K
-                        << " exceeds the accelerator limit of " << kSystolicMaxK
-                        << "; it stays on the CPU";
+      op->emitWarning() << whyLeftOnCpu(op) << "; it stays on the CPU";
     });
 
     // Record how much went to the accelerator, for the summary at the end.
@@ -1422,6 +1507,10 @@ public:
 // A convolution is a matrix multiply once the input windows are laid out as
 // rows. Rewriting it that way lets the matmul offload pass send the bulk of
 // the work to the accelerator.
+//
+// A convolution that is not rewritten stays on the CPU. Each one gets a
+// warning that says why, so that the share of work on the CPU in the summary
+// is never a surprise.
 class ConvToIm2Col : public impl::ConvToIm2ColBase<ConvToIm2Col> {
 public:
   using impl::ConvToIm2ColBase<ConvToIm2Col>::ConvToIm2ColBase;
@@ -1430,10 +1519,38 @@ public:
     func::FuncOp fn = getOperation();
     IRRewriter rewriter(fn.getContext());
 
-    SmallVector<linalg::Conv2DNhwcHwcfOp> convs;
-    fn.walk([&](linalg::Conv2DNhwcHwcfOp op) { convs.push_back(op); });
+    // Every kind of convolution, not only the one that can be rewritten.
+    // Pooling has the same loop structure but does not multiply, so it is
+    // not work the accelerator could take.
+    SmallVector<linalg::LinalgOp> convs;
+    fn.walk([&](linalg::LinalgOp op) {
+      if (linalg::isaConvolutionOpInterface(op) && multipliesAndAccumulates(op))
+        convs.push_back(op);
+    });
 
-    for (linalg::Conv2DNhwcHwcfOp op : convs) {
+    for (linalg::LinalgOp anyConv : convs) {
+      // Only the NHWC convolution with an HWCF kernel turns into one matmul in
+      // the orientation the driver expects. The op name tells the others
+      // apart: "depthwise" in it, or the "_q" suffix of the variants that
+      // subtract a zero point.
+      auto op = dyn_cast<linalg::Conv2DNhwcHwcfOp>(anyConv.getOperation());
+      if (!op) {
+        StringRef name = anyConv->getName().getStringRef();
+        if (name.contains("depthwise"))
+          anyConv->emitWarning() << "depthwise convolution is one small matmul "
+                                    "per channel, which is not offloaded; it "
+                                    "stays on the CPU";
+        else if (name.ends_with("_q"))
+          anyConv->emitWarning() << "convolution has a zero point, which the "
+                                    "accelerator does not subtract; it stays "
+                                    "on the CPU";
+        else
+          anyConv->emitWarning() << name << " is not a convolution the "
+                                            "accelerator takes; it stays on "
+                                            "the CPU";
+        continue;
+      }
+
       // The matmul that im2col produces only goes to the accelerator as
       // i16 x i16 -> i32. With other element types the rewrite would just
       // cost an im2col buffer, so leave the convolution as it is.
@@ -1469,12 +1586,22 @@ public:
           continue;
         }
       }
+
+      // The im2col rewrite does not handle a dilated kernel.
+      if (llvm::any_of(op.getDilations().getValues<int64_t>(),
+                       [](int64_t d) { return d != 1; })) {
+        op->emitWarning() << "convolution has a dilation other than one, "
+                             "which is not offloaded; it stays on the CPU";
+        continue;
+      }
+
       rewriter.setInsertionPoint(op);
       FailureOr<std::pair<Operation *, Operation *>> result =
           linalg::rewriteInIm2Col(rewriter, op);
       if (failed(result))
-        continue;                 // leave it for the CPU path
-      // rewriteInIm2Col already replaced the uses; nothing else to do
+        op->emitWarning() << "convolution could not be turned into a matmul; "
+                             "it stays on the CPU";
+      // on success rewriteInIm2Col has already replaced the uses
     }
   }
 };
