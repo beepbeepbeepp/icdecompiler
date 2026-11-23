@@ -565,20 +565,29 @@ public:
     // Quoted, not angle-bracketed: it sits next to the generated source.
     // Inserted before the standard headers so they end up above it.
     // libm calls come from convert-math-to-emitc; the driver call from the
-    // matmul pass. Each needs its header, and only when actually used.
+    // matmul pass; memcpy from a memref.copy that could not be removed. Each
+    // needs its header, and only when actually used.
     static constexpr StringRef mathFns[] = {
         "expf", "exp", "logf", "log", "sqrtf", "sqrt", "tanhf", "tanh",
         "floorf", "floor", "ceilf", "ceil", "roundf", "round", "fabsf", "fabs",
         "cosf", "cos", "sinf", "sin", "powf", "pow"};
 
-    bool usesDriver = false, usesMath = false;
+    bool usesDriver = false, usesMath = false, usesMemcpy = false;
     mod.walk([&](emitc::CallOpaqueOp call) {
       StringRef callee = call.getCallee();
       if (callee == kSystolicCallee)
         usesDriver = true;
       if (llvm::is_contained(mathFns, callee))
         usesMath = true;
+      if (callee == "memcpy")
+        usesMemcpy = true;
     });
+    if (usesMemcpy && !present.contains("string.h")) {
+      builder.setInsertionPointToStart(mod.getBody());
+      builder.create<emitc::IncludeOp>(mod.getLoc(),
+                                       builder.getStringAttr("string.h"),
+                                       /*is_standard_include=*/builder.getUnitAttr());
+    }
     if (usesMath && !present.contains("math.h")) {
       builder.setInsertionPointToStart(mod.getBody());
       builder.create<emitc::IncludeOp>(mod.getLoc(),

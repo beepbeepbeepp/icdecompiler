@@ -128,3 +128,21 @@ check_rejected reject_element_type   "element type that is not supported"
 check_rejected reject_call           "calls between functions are not supported"
 check_rejected reject_rank0_constant "rank-0 constant is not supported"
 check_rejected reject_no_function    "no function to compile"
+
+# The generated C has to declare every function it calls: gcc 14 and later
+# refuse a call to an undeclared function. Arguments: input name, mode.
+check_declares_calls() {
+  local name="$1" mode="${2:-}"
+  "$ROOT/icdecompiler" "$ROOT/tests/inputs/$name.mlir" $mode -o "$TMP/$name.c" \
+    > /dev/null 2>&1
+  if ! gcc -fsyntax-only -Werror=implicit-function-declaration \
+       "$TMP/$name.c" -I"$ROOT" -I"$HERE/stub-include" 2> "$TMP/$name.err"; then
+    echo "FAIL: $name: generated C calls a function it does not declare" >&2
+    grep 'implicit declaration' "$TMP/$name.err" >&2 || true
+    exit 1
+  fi
+  echo "OK: $name declares every function it calls"
+}
+
+# a copy that stays in the output becomes a memcpy
+check_declares_calls copy_reads_dest --cpu
