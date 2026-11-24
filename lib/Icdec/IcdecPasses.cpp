@@ -1520,6 +1520,11 @@ public:
     SmallVector<memref::GetGlobalOp> readers;
     mod.walk([&](memref::GetGlobalOp g) { readers.push_back(g); });
 
+    // remember which globals are read at all, for the declarations below
+    llvm::SmallDenseSet<StringRef> read;
+    for (memref::GetGlobalOp g : readers)
+      read.insert(g.getName());
+
     for (memref::GetGlobalOp g : readers) {
       auto memrefTy = dyn_cast<MemRefType>(g.getType());
       if (!memrefTy || !memrefTy.hasStaticShape())
@@ -1539,6 +1544,13 @@ public:
     mod.walk([&](memref::GlobalOp g) { decls.push_back(g); });
 
     for (memref::GlobalOp g : decls) {
+      // A constant can lose its last reader on the way here, when everything
+      // that read it was folded away. Declaring it anyway hands the C compiler
+      // an unused variable to warn about, so it is dropped instead.
+      if (g.isPrivate() && !read.contains(g.getSymName())) {
+        g.erase();
+        continue;
+      }
       auto memrefTy = g.getType();
       if (!memrefTy.hasStaticShape())
         continue;
