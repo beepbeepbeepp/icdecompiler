@@ -11,6 +11,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$(dirname "$HERE")")"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+source "$ROOT/tests/strict-cflags.sh"
 
 run_case() {
   local mlir="$1"
@@ -27,7 +28,7 @@ run_case() {
     cat "$TMP/body.c"
   } > "$TMP/gen.c"
 
-  gcc "$TMP/gen.c" "$HERE/$driver" -I"$HERE" ${CASE_CFLAGS:-} -o "$TMP/test_$name" -lm
+  gcc $STRICT_CFLAGS "$TMP/gen.c" "$HERE/$driver" -I"$HERE" ${CASE_CFLAGS:-} -o "$TMP/test_$name" -lm
   "$TMP/test_$name"
 }
 
@@ -57,7 +58,7 @@ sed 's/conv_accel/conv_cpu/' "$TMP/conv_cpu.c" > "$TMP/cc1.c"
   sed 's/conv_accel/conv_acc/' "$TMP/conv_acc.c"
 } > "$TMP/cc2.c"
 
-gcc -O2 -I"$HERE" "$TMP/cc1.c" "$TMP/cc2.c" "$HERE/main_conv_accel.c" \
+gcc $STRICT_CFLAGS -O2 -I"$HERE" "$TMP/cc1.c" "$TMP/cc2.c" "$HERE/main_conv_accel.c" \
     -o "$TMP/test_conv_accel"
 "$TMP/test_conv_accel"
 

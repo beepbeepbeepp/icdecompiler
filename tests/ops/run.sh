@@ -18,12 +18,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$(dirname "$HERE")")"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+source "$ROOT/tests/strict-cflags.sh"
 
 # Is this file C that a compiler accepts? The accelerator path includes the
 # driver header, which needs the stub pulp.h to be read on the host.
 valid_c() {
-    gcc -fsyntax-only "$1" -I"$ROOT" -I"$ROOT/tests/compile/stub-include" \
-        > "$TMP/gcc.log" 2>&1
+    gcc $STRICT_CFLAGS -S "$1" -I"$ROOT" -I"$ROOT/tests/compile/stub-include" \
+        -o /dev/null > "$TMP/gcc.log" 2>&1
 }
 
 first_error() {

@@ -11,6 +11,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$(dirname "$HERE")")"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+source "$ROOT/tests/strict-cflags.sh"
 
 INPUT="${1:-$ROOT/tests/inputs/int_matmul.mlir}"
 
@@ -25,7 +26,7 @@ INPUT="${1:-$ROOT/tests/inputs/int_matmul.mlir}"
 
 # Stop before the assembler: the driver has RISC-V instructions (fence) that a
 # host assembler rejects. Type and prototype checks all happen before that.
-gcc -S "$TMP/full.c" -I"$ROOT" -I"$HERE/stub-include" -o "$TMP/out.s"
+gcc $STRICT_CFLAGS -S "$TMP/full.c" -I"$ROOT" -I"$HERE/stub-include" -o "$TMP/out.s"
 
 echo "OK: generated C compiles against systolic_drv.h"
 grep -q 'call.*systolic_multiply_large_hwpe' "$TMP/out.s" \
