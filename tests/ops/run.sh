@@ -31,11 +31,16 @@ first_error() {
     grep -m1 "error:" "$1" | sed 's/.*error: //' | cut -c1-48
 }
 
+# The operators that are expected to land on the accelerator. Each of them has
+# to show at least one driver call below, and no other operator may show any.
+ON_ARRAY=" conv2d matmul "
+
 total=0
 failed=()
+misplaced=()
 
-printf '%-18s %-8s %-10s %s\n' "operator" "to C" "on array" "note"
-printf '%-18s %-8s %-10s %s\n' "------------------" "--------" "----------" "----"
+printf '%-18s %-8s %-10s %s\n' "operator" "to C" "on array" "error"
+printf '%-18s %-8s %-10s %s\n' "------------------" "--------" "----------" "-----"
 
 for mlir in "$HERE"/*.mlir; do
     name=$(basename "$mlir" .mlir)
@@ -55,25 +60,27 @@ for mlir in "$HERE"/*.mlir; do
     fi
 
     # Array path: did any of it become a driver call?
-    note=""
+    error=""
     if ! "$ROOT/icdecompiler" "$mlir" -o "$TMP/${name}_acc.c" > "$TMP/${name}_acc.log" 2>&1; then
         onarray="failed"
-        note=$(first_error "$TMP/${name}_acc.log")
+        error=$(first_error "$TMP/${name}_acc.log")
         failed+=("$name")
     elif ! valid_c "$TMP/${name}_acc.c"; then
         onarray="bad C"
-        note=$(first_error "$TMP/gcc.log")
+        error=$(first_error "$TMP/gcc.log")
         failed+=("$name")
     else
         calls=$(grep -c "systolic_multiply_large_hwpe(" "$TMP/${name}_acc.c" || true)
         if [[ "$calls" -gt 0 ]]; then
-            onarray="$calls calls"
+            onarray="yes"
+            [[ "$ON_ARRAY" == *" $name "* ]] || misplaced+=("$name")
         else
             onarray="no"
+            [[ "$ON_ARRAY" == *" $name "* ]] && misplaced+=("$name")
         fi
     fi
 
-    printf '%-18s %-8s %-10s %s\n' "$name" "yes" "$onarray" "$note"
+    printf '%-18s %-8s %-10s %s\n' "$name" "yes" "$onarray" "$error"
 done
 
 echo
@@ -82,3 +89,9 @@ if [[ ${#failed[@]} -gt 0 ]]; then
     exit 1
 fi
 echo "OK: all $total operators compile to valid C on both paths"
+if [[ ${#misplaced[@]} -gt 0 ]]; then
+    echo "FAIL: the 'on array' column is not as expected for: ${misplaced[*]}" >&2
+    echo "      expected on the accelerator:$ON_ARRAY" >&2
+    exit 1
+fi
+echo "OK:${ON_ARRAY}reach the accelerator and no other operator does"
