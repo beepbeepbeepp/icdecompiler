@@ -1,3 +1,7 @@
+// A convolution written straight in linalg, on buffers, with its kernel laid
+// out as FHWC. Only the HWCF layout is offloaded, which is the layout of every
+// model that comes from TOSA, so this one stays on the CPU with a warning.
+
 #map = affine_map<(d0, d1, d2, d3) -> (d3)>
 #map1 = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
 

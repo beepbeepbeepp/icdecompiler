@@ -89,6 +89,9 @@ check_stays_on_cpu matvec            0 "linalg.matvec is not a matrix multiply"
 check_stays_on_cpu conv_zero_point 0 "convolution has a zero point"
 check_stays_on_cpu conv_dilation   0 "convolution has a dilation other than one"
 check_stays_on_cpu conv_depthwise  0 "depthwise convolution is one small matmul"
+# a convolution written straight in linalg with its kernel laid out as FHWC; a
+# model that comes from TOSA always has the HWCF layout
+check_stays_on_cpu conv_named_fhwc 0 "conv_2d_nhwc_fhwc is not a convolution the accelerator takes"
 
 # A rewrite that cannot finish must leave nothing behind. Here the second
 # operand cannot become a C pointer, which the rewrite used to find out only
@@ -166,6 +169,41 @@ if ! "$ROOT/icdecompiler" "$ROOT/tests/inputs/unused_declaration.mlir" --cpu \
 fi
 echo "OK: unused_declaration compiles past a declaration without a body"
 
+# The C that comes out has to be C a compiler accepts, with every warning
+# counted as an error. Arguments: input name, mode.
+check_valid_c() {
+  local name="$1" mode="${2:-}"
+  if ! "$ROOT/icdecompiler" "$ROOT/tests/inputs/$name.mlir" $mode -o "$TMP/$name.c" \
+       > /dev/null 2> "$TMP/$name.err"; then
+    echo "FAIL: $name: does not compile${mode:+ with $mode}" >&2
+    grep -m1 'error:' "$TMP/$name.err" >&2 || true
+    exit 1
+  fi
+  if ! gcc $STRICT_CFLAGS -S "$TMP/$name.c" -I"$ROOT" -I"$HERE/stub-include" \
+       -o /dev/null 2> "$TMP/$name.gcc"; then
+    echo "FAIL: $name: the generated C is not valid${mode:+ with $mode}" >&2
+    grep -m1 'error:' "$TMP/$name.gcc" >&2 || true
+    exit 1
+  fi
+  echo "OK: $name compiles to valid C${mode:+ with $mode}"
+}
+
+# A whole model in float, the shape of HAR. Nothing in it fits the accelerator,
+# and all of it still has to come out as C on either path.
+check_valid_c har_model
+check_valid_c har_model --cpu
+
+# A function that returns its result. C cannot return an array, so the result
+# becomes one more array parameter, after the inputs.
+check_valid_c returns_tensor --cpu
+if ! grep -qE 'add_two\(float v[0-9]+\[4\], float v[0-9]+\[4\], float v[0-9]+\[4\]\)' \
+     "$TMP/returns_tensor.c"; then
+  echo "FAIL: returns_tensor: the result is not an output parameter" >&2
+  grep 'add_two' "$TMP/returns_tensor.c" >&2 || true
+  exit 1
+fi
+echo "OK: returns_tensor passes its result through an output parameter"
+
 # The generated C has to declare every function it calls: gcc 14 and later
 # refuse a call to an undeclared function. Arguments: input name, mode.
 check_declares_calls() {
@@ -224,3 +262,12 @@ check_summary matmul_i64 --cpu "MACs total : 24"
 check_summary copy_reads_dest --cpu "scratch memory : 16 bytes"
 check_summary bool_buffer     --cpu "scratch memory : 4 bytes"
 
+# An element-wise multiply accumulates nothing, so it is not work the
+# accelerator could take: nothing is counted and nothing is warned about.
+check_summary elementwise_mul "" "MACs total : 0"
+if grep -q 'warning:' "$TMP/elementwise_mul.err"; then
+  echo "FAIL: elementwise_mul: warns although it has no multiply-accumulate" >&2
+  grep 'warning:' "$TMP/elementwise_mul.err" >&2
+  exit 1
+fi
+echo "OK: elementwise_mul gets no warning"

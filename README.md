@@ -99,7 +99,8 @@ Runs three suites. `numeric` checks generated code against reference results,
 including one case that compiles the CPU and accelerator paths into the same
 program and checks they agree. `compile` checks the output builds against the
 driver header. `ops` reports which TOSA operators reach C and which of them go
-to the accelerator.
+to the accelerator. The run ends with a check that every file in
+`tests/inputs` is used by a test.
 
 ## How it works
 
