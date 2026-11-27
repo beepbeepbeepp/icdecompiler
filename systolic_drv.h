@@ -1,3 +1,11 @@
+/*
+ * Copyright 2026 Indonesia Chip Design Collaborative Center (ICDeC)
+ * Authors: Fauzan Ibrahim
+ *          Najmi Azzahra Feryputri
+ *          Muhammad Faudzan Abdullah
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef SYSTOLIC_DRV_H
 #define SYSTOLIC_DRV_H
 
@@ -396,8 +404,38 @@ static inline int systolic_multiply_large_hwpe(int M,
         return SYSTOLIC_HWPE_ERR_BAD_K;
     }
 
-    for (int i = 0; i < M; i += SYSTOLIC_HWPE_ROWS) {
-        for (int j = 0; j < N; j += SYSTOLIC_HWPE_COLS) {
+    /* Elements in one A tile (8 rows x K). Always even. */
+    const int a_tile_elems = SYSTOLIC_HWPE_ROWS * K;
+
+    for (int j = 0; j < N; j += SYSTOLIC_HWPE_COLS) {
+
+        /*
+         * B tile: K rows x 8 columns, row-major. It depends on j only, so it
+         * is staged once here and reused for every row block below. Two
+         * 16-bit elements go out in one 32-bit store.
+         */
+        uint32_t b_addr = SYSTOLIC_HWPE_TCDM_B_ADDR;
+
+        for (int k_idx = 0; k_idx < K; k_idx++) {
+            const int16_t *src = &B[k_idx * N + j];
+
+            for (int c = 0; c < SYSTOLIC_HWPE_COLS; c += 2) {
+                uint32_t lo = 0u;
+                uint32_t hi = 0u;
+
+                if ((j + c) < N) {
+                    lo = (uint16_t)src[c];
+                }
+                if ((j + c + 1) < N) {
+                    hi = (uint16_t)src[c + 1];
+                }
+
+                systolic_mem_write32(b_addr, lo | (hi << 16));
+                b_addr += 4u;
+            }
+        }
+
+        for (int i = 0; i < M; i += SYSTOLIC_HWPE_ROWS) {
 
             systolic_reset();
             set_size((uint32_t)K);
@@ -415,33 +453,36 @@ static inline int systolic_multiply_large_hwpe(int M,
                     0xDEADBEEFu);
             }
 
-            systolic_io_barrier();
+            /*
+             * A tile: 8 rows x K columns, row-major. These rows are one
+             * contiguous run in A, copied two elements per store; rows past
+             * the end of A are zero.
+             */
+            const int16_t *src = &A[i * K];
+            uint32_t a_addr = SYSTOLIC_HWPE_TCDM_A_ADDR;
+            int rows = M - i;
 
-            /* A tile: 8 rows x K columns, row-major. */
-            for (int r = 0; r < SYSTOLIC_HWPE_ROWS; r++) {
-                for (int k_idx = 0; k_idx < K; k_idx++) {
-                    int16_t value = 0;
-
-                    if ((i + r) < M) {
-                        value = A[(i + r) * K + k_idx];
-                    }
-
-                    systolic_load_west(r * K + k_idx, (uint16_t)value);
-                }
+            if (rows > SYSTOLIC_HWPE_ROWS) {
+                rows = SYSTOLIC_HWPE_ROWS;
             }
 
-            /* B tile: K rows x 8 columns, row-major. */
-            for (int k_idx = 0; k_idx < K; k_idx++) {
-                for (int c = 0; c < SYSTOLIC_HWPE_COLS; c++) {
-                    int16_t value = 0;
+            const int valid = rows * K;
+            int e = 0;
 
-                    if ((j + c) < N) {
-                        value = B[k_idx * N + (j + c)];
-                    }
-
-                    systolic_load_north(k_idx * SYSTOLIC_HWPE_COLS + c,
-                                        (uint16_t)value);
-                }
+            for (; (e + 1) < valid; e += 2) {
+                systolic_mem_write32(a_addr,
+                    (uint32_t)(uint16_t)src[e] |
+                    ((uint32_t)(uint16_t)src[e + 1] << 16));
+                a_addr += 4u;
+            }
+            if (e < valid) {
+                systolic_mem_write32(a_addr, (uint32_t)(uint16_t)src[e]);
+                a_addr += 4u;
+                e += 2;
+            }
+            for (; e < a_tile_elems; e += 2) {
+                systolic_mem_write32(a_addr, 0u);
+                a_addr += 4u;
             }
 
             systolic_io_barrier();
