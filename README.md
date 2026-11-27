@@ -53,7 +53,7 @@ not included, since they arrive as parameters.
 icdecompiler          compiler driver, the script you run
 model-tools/          weight extraction, TFLite/Keras to TOSA, verification
 runtime/              soft-float expf for cores without an FPU
-tests/                numeric, compile and operator-coverage suites
+tests/                numeric, compile, operator-coverage and end-to-end suites
 docs/                 guides
 make-release.sh       packages compiler and tools for distribution
 include/ lib/         compiler passes
@@ -95,12 +95,14 @@ On a machine with limited memory, use `ninja -j1`.
 ./tests/run-all.sh
 ```
 
-Runs three suites. `numeric` checks generated code against reference results,
+Runs four suites. `numeric` checks generated code against reference results,
 including one case that compiles the CPU and accelerator paths into the same
 program and checks they agree. `compile` checks the output builds against the
 driver header. `ops` reports which TOSA operators reach C and which of them go
-to the accelerator. The run ends with a check that every file in
-`tests/inputs` is used by a test.
+to the accelerator. `e2e` takes one small model, tiny-cnn, through the whole
+flow and checks its output on both paths; the step from the SavedModel to TOSA
+needs the Python environment of `model-tools` and is skipped without it. The
+run ends with a check that every file in `tests/inputs` is used by a test.
 
 ## How it works
 

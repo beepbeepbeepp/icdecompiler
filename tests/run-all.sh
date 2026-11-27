@@ -15,6 +15,9 @@ echo "== compile =="
 echo
 echo "== operator coverage =="
 "$HERE/ops/run.sh"
+echo
+echo "== end to end =="
+"$HERE/e2e/run.sh"
 
 echo
 echo "== unused inputs =="
