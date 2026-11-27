@@ -26,6 +26,7 @@ import os
 
 import numpy as np
 from savedmodel_layers import layer_names, batchnorm_for
+from c_arrays import c_array, dims_of
 
 
 Q88_SCALE = 256          # 2^8
@@ -82,20 +83,6 @@ def collect_layers(V):
                        V[f"{name}/kernel:0"],     # [Cin, Cout]
                        V[f"{name}/bias:0"]))
     return layers
-
-
-def c_array(ctype, name, arr, dims, per_line):
-    flat = arr.ravel()
-    lines = [f"const {ctype} {name}{dims} = {{"]
-    for i in range(0, len(flat), per_line):
-        chunk = ", ".join(str(int(v)) for v in flat[i:i + per_line])
-        lines.append("    " + chunk + ("," if i + per_line < len(flat) else ""))
-    lines.append("};")
-    return "\n".join(lines)
-
-
-def dims_of(shape):
-    return "".join(f"[{d}]" for d in shape)
 
 
 def main():

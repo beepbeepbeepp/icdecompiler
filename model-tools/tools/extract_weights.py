@@ -24,6 +24,8 @@ import math
 import numpy as np
 import tflite
 
+from c_arrays import c_array, dims_of
+
 
 def quantize_multiplier(m):
     """Port of TFLite QuantizeMultiplier: m -> (int32 multiplier, right shift)."""
@@ -74,20 +76,6 @@ class Model:
             ins = [op.Inputs(j) for j in range(op.InputsLength())]
             bias = ins[2] if len(ins) > 2 else -1
             yield kind, ins[1], bias, ins[0], op.Outputs(0)
-
-
-def c_array(ctype, name, arr, dims, per_line):
-    flat = arr.ravel()
-    lines = [f"const {ctype} {name}{dims} = {{"]
-    for i in range(0, len(flat), per_line):
-        chunk = ", ".join(str(int(v)) for v in flat[i:i + per_line])
-        lines.append("    " + chunk + ("," if i + per_line < len(flat) else ""))
-    lines.append("};")
-    return "\n".join(lines)
-
-
-def dims_of(shape):
-    return "".join(f"[{d}]" for d in shape)
 
 
 def main():
